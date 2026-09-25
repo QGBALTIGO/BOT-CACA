@@ -5,6 +5,7 @@ import asyncio
 import io
 import json
 import time
+import weakref
 from pathlib import Path
 
 import aiohttp
@@ -20,20 +21,29 @@ class Telegram:
         self._gate = asyncio.Lock()
         self._last = 0.0
         self._chats: dict[int, float] = {}
+        self._chat_locks = weakref.WeakValueDictionary()
+
+    async def _global_pace(self):
+        async with self._gate:
+            delay = self._last + 0.05 - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            self._last = time.monotonic()
 
     async def _pace(self, chat_id: int | None):
-        async with self._gate:
-            now = time.monotonic()
-            target = self._last + 0.05
-            if chat_id is not None:
-                target = max(target, self._chats.get(chat_id, 0.0) + 1.05)
-            if target > now:
-                await asyncio.sleep(target - now)
-            self._last = time.monotonic()
-            if chat_id is not None:
-                self._chats[chat_id] = self._last
+        if chat_id is None:
+            await self._global_pace()
+            return
+        # One busy conversation must not hold the global lock for other readers.
+        lock = self._chat_locks.setdefault(chat_id, asyncio.Lock())
+        async with lock:
+            delay = self._chats.get(chat_id, 0.0) + 1.05 - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            await self._global_pace()
+            self._chats[chat_id] = time.monotonic()
             if len(self._chats) > 5000:
-                self._chats = {key: val for key, val in self._chats.items() if val > self._last - 60}
+                self._chats = {key: value for key, value in self._chats.items() if value > self._last - 60}
 
     async def call(self, method: str, data: dict | None = None, *, file=None, timeout=65):
         values = data or {}

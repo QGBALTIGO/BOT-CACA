@@ -88,7 +88,9 @@ class Downloads:
             await self.store.job_status(job.id, "running")
             await self.status(job, "📊 Verificando o limite da conta conectada…")
             quota = await self.source.quota()
-            if quota.remaining is not None and quota.remaining <= 0:
+            if quota.remaining is None or quota.limit < 0 or quota.used < 0:
+                raise UserError("A fonte não informou uma cota válida. O pedido foi pausado para evitar consumo desconhecido.", "quota_unknown")
+            if quota.remaining <= 0:
                 raise UserError("O limite da conta na fonte foi atingido. Consulte /limite.", "quota")
             await self.status(job, "📥 Solicitando o arquivo à fonte…")
             url, extension = await self.source.file_info(job.book)
@@ -140,6 +142,7 @@ class Downloads:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                # Uma falha de banco não deve encerrar silenciosamente o worker.
                 log.error("Falha de infraestrutura do worker: %s", type(exc).__name__)
             finally:
                 self.active_users.discard(job.user_id)

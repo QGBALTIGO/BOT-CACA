@@ -41,6 +41,10 @@ def validate_url(url: str, allowed_hosts: frozenset[str] | None = None) -> str:
     return url
 
 
+class UnsafeDNS(OSError):
+    """The DNS response points at non-public space; stop before connecting."""
+
+
 class PublicResolver(aiohttp.abc.AbstractResolver):
     """Filtra os IPs que o conector de fato utilizará, não só uma consulta prévia."""
 
@@ -50,7 +54,7 @@ class PublicResolver(aiohttp.abc.AbstractResolver):
     async def resolve(self, host: str, port: int = 0, family: int = socket.AF_INET):
         records = await self.inner.resolve(host, port, family)
         if not records or any(not public_ip(ipaddress.ip_address(r["host"])) for r in records):
-            raise OSError("Destino DNS não público bloqueado")
+            raise UnsafeDNS("Destino DNS não público bloqueado")
         return records
 
     async def close(self):
@@ -63,7 +67,7 @@ def new_session() -> aiohttp.ClientSession:
         cookie_jar=aiohttp.DummyCookieJar(),
         timeout=aiohttp.ClientTimeout(total=45, connect=10, sock_read=30),
         trust_env=False,
-        headers={"User-Agent": "LivrosBaltigo/0.1 (+private Telegram client)"},
+        headers={"User-Agent": "LivrosBaltigo/0.4 (+Telegram library client)"},
     )
 
 

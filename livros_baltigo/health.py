@@ -16,6 +16,7 @@ def health_payload(app) -> dict:
     return {
         "status": "ok" if healthy else "starting_or_unhealthy",
         "version": __version__,
+        "catalog_state": getattr(app, "catalog_state", "not_verified"),
         "telegram_polling": poll_ok,
         "worker_alive": bool(worker and not worker.done()),
         "source": "configured_not_verified" if app.settings.source_configured else "awaiting_credentials",
@@ -29,7 +30,7 @@ def create_app(bot) -> web.Application:
         result = health_payload(bot)
         ready = result["status"] == "ok"
         if request.path == "/ready":
-            ready = ready and bot.settings.source_configured
+            ready = ready and bot.settings.source_configured and getattr(bot, "catalog_state", "not_verified") == "ready"
         return web.json_response(result, status=200 if ready else 503,
                                  headers={"Cache-Control": "no-store"})
 
