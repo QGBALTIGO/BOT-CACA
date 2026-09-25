@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import socket
 import re
 import time
@@ -24,6 +25,7 @@ from .catalog import LANGUAGES
 from .errors import UserError
 from .models import Book, Quota, SearchPage, SearchSpec, to_int
 from .network import limited_body, validate_url
+from .availability import pause_message, retry_after_seconds, network_kind
 
 Progress = Callable[[int, int | None], Awaitable[None]]
 
@@ -51,8 +53,29 @@ class ZLibrary:
         self.user_key = settings.user_key
         self.auth_lock = asyncio.Lock()
         self.retry_at = 0.0
+        self.retry_code = ""
         host = (urlsplit(self.base).hostname or "").lower()
         self.file_hosts = settings.file_hosts | {host}
+
+    def pause(self, code: str, seconds: float = 30):
+        """Local retry protection retains the cause; it is not a download quota."""
+        self.retry_code = code
+        self.retry_at = time.monotonic() + max(1, seconds)
+
+    def check_pause(self):
+        remaining = math.ceil(self.retry_at - time.monotonic())
+        if remaining > 0:
+            code = self.retry_code or "cooldown"
+            raise UserError(pause_message(code, remaining), code)
+
+    def network_error(self, exc: BaseException) -> UserError:
+        code = network_kind(exc)
+        error = getattr(exc, "os_error", None) or exc
+        logging.getLogger(__name__).warning(
+            "Fonte indisponível: categoria=%s tipo=%s errno=%s",
+            code, type(error).__name__, getattr(error, "errno", None))
+        self.pause(code, 30)
+        return UserError(pause_message(code, 30), code)
 
     def _headers(self) -> dict[str, str]:
         result = {"Accept": "application/json"}
@@ -64,6 +87,7 @@ class ZLibrary:
         return result
 
     async def ensure_login(self):
+        self.check_pause()
         if not self.settings.source_configured:
             raise UserError("O bot está conectado ao Telegram, mas a integração com o Z-Library ainda não foi configurada. O administrador precisa definir o domínio e as credenciais nas variáveis do Railway. Não envie senhas pelo chat.", "setup_required")
         if self.user_id and self.user_key:
@@ -86,32 +110,29 @@ class ZLibrary:
     async def _request(self, method: str, path: str, *, data=None, authenticate=True) -> dict:
         if authenticate:
             await self.ensure_login()
-        if time.monotonic() < self.retry_at:
-            raise UserError("A fonte pediu uma pausa. Tente novamente mais tarde.", "rate_limit")
+        self.check_pause()
         url = validate_url(self.base + path)
         try:
             async with self.api.request(method, url, data=data, headers=self._headers(), allow_redirects=False) as response:
                 if response.status == 429:
-                    retry = to_int(response.headers.get("Retry-After")) or 30
-                    self.retry_at = time.monotonic() + min(600, max(1, retry))
-                    raise UserError("A fonte limitou as consultas temporariamente. Tente novamente mais tarde.", "rate_limit")
+                    self.pause("rate_limit", retry_after_seconds(response.headers.get("Retry-After")))
+                    self.check_pause()
                 if response.status == 401:
+                    self.pause("auth", 60)
                     raise UserError("Sessão expirada ou inválida. O administrador precisa atualizar as credenciais no servidor.", "auth")
                 if response.status == 403:
+                    self.pause("blocked", 60)
                     raise UserError("A fonte bloqueou a requisição. Verifique o domínio e a conta; o bot não contorna esse bloqueio.", "blocked")
                 if 300 <= response.status < 400:
                     raise UserError("O domínio da API redirecionou. Verifique ZLIB_BASE_URL antes de enviar credenciais a outro endereço.", "api_redirect")
                 if response.status == 404:
                     raise UserError("Rota não encontrada na fonte. O domínio ou a API pode ter mudado.", "not_found")
                 if response.status != 200:
+                    self.pause("unavailable", 30)
                     raise UserError("A fonte está indisponível no momento.", "unavailable")
                 raw = await limited_body(response, 2_000_000)
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
-            error = getattr(exc, "os_error", None)
-            code = "source_dns" if isinstance(error, socket.gaierror) else "network"
-            logging.getLogger(__name__).warning("Fonte indisponível: categoria=%s tipo=%s errno=%s", code, type(error or exc).__name__, getattr(error, "errno", None))
-            self.retry_at = time.monotonic() + 30
-            raise UserError("Não foi possível resolver o endereço da fonte no servidor." if code == "source_dns" else "Não foi possível acessar a fonte. Tente novamente mais tarde.", code) from exc
+            raise self.network_error(exc) from exc
         try:
             payload = json.loads(raw)
         except (ValueError, UnicodeDecodeError) as exc:

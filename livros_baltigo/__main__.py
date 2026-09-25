@@ -11,24 +11,28 @@ import time
 
 from filelock import FileLock, Timeout
 
-from .app import BotApp
+from .operations import OperationsApp as BotApp
 from .config import Settings
 from .errors import TelegramError, UserError
 from .network import new_session
 from .provider import ZLibrary
 from .scraper import HTMLSource
+from .transport_audit import probe_origin
+from urllib.parse import urlsplit
 from .storage import Store
 from .telegram import Telegram
 from .runtime import prepare_data
 
 
 async def execute(settings: Settings, doctor=False):
-    async with new_session() as api, new_session() as files, new_session() as telegram_session:
+    async with new_session(audit_host=urlsplit(settings.base_url).hostname or "") as api, new_session() as files, new_session() as telegram_session:
         telegram = Telegram(settings.bot_token, telegram_session)
         mode = os.getenv("BOOK_SOURCE_MODE", "html").lower().strip()
         if mode not in {"html", "api"}:
             raise ValueError("BOOK_SOURCE_MODE deve ser html ou api")
         source = (HTMLSource if mode == "html" else ZLibrary)(settings, api, files)
+        if settings.source_configured:
+            await probe_origin(api, settings.base_url)
         if doctor:
             me = await telegram.call("getMe")
             print(f"Telegram: conectado a @{me.get('username', '(sem username)')}")
@@ -57,7 +61,7 @@ def main() -> int:
     parser.add_argument("--doctor", action="store_true", help="Testar Telegram e perfil da fonte; sem baixar livros")
     parser.add_argument("--health", action="store_true", help="Healthcheck do processo em execução")
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(stream=sys.stdout, level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     logging.getLogger("aiohttp").setLevel(logging.ERROR)
     # Arquivos de dados e sessão locais não ficam legíveis para outros usuários no Unix.
     os.umask(0o077)

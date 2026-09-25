@@ -1,0 +1,11 @@
+.git
+.env*
+!.env.example
+__pycache__
+*.pyc
+.venv*
+data
+relatorios
+*.session
+*.sqlite*
+*.zip

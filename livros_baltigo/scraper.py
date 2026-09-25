@@ -16,6 +16,7 @@ from .errors import UserError
 from .models import Book, SearchPage, SearchSpec, parse_bytes
 from .network import limited_body, validate_url
 from .provider import ZLibrary
+from .availability import retry_after_seconds
 
 
 def same_origin(base: str, value: str) -> str:
@@ -122,8 +123,7 @@ class HTMLSource(ZLibrary):
         await self.ensure_login()
         current = same_origin(self.base, path)
         async with self.html_lock:
-            if time.monotonic() < self.retry_at:
-                raise UserError('A fonte pediu uma pausa. Tente mais tarde.', 'rate_limit')
+            self.check_pause()
             await asyncio.sleep(max(0, 1 - (time.monotonic() - self.last_html)))
             self.last_html = time.monotonic()
             try:
@@ -137,9 +137,9 @@ class HTMLSource(ZLibrary):
                             current = same_origin(self.base, urljoin(current, location))
                             continue
                         if code in {401, 403, 429}:
-                            self.retry_at = time.monotonic() + 60
                             error = {401: 'html_auth', 403: 'blocked', 429: 'rate_limit'}[code]
-                            raise UserError('A fonte não autorizou esta consulta. Nenhum bloqueio será contornado.', error)
+                            self.pause(error, retry_after_seconds(response.headers.get('Retry-After')) if code == 429 else 60)
+                            self.check_pause()
                         if code != 200:
                             raise UserError('A página solicitada não está disponível.', 'not_found' if code == 404 else 'unavailable')
                         mime = response.headers.get('Content-Type', '').lower()
@@ -151,9 +151,7 @@ class HTMLSource(ZLibrary):
                     return value
                 raise UserError('A página redirecionou muitas vezes.', 'redirect_loop')
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
-                self.retry_at = time.monotonic() + 30
-                code = 'source_dns' if isinstance(getattr(exc, 'os_error', None), OSError) and getattr(exc.os_error, 'errno', 0) in {-2, -3, 11001} else 'network'
-                raise UserError('O servidor não conseguiu alcançar o endereço da fonte.', code) from exc
+                raise self.network_error(exc) from exc
 
     async def search(self, spec: SearchSpec, page=1, limit=8):
         if not 1 <= page <= 1000 or not 1 <= limit <= 10 or not 1 <= len(spec.query.strip()) <= 200:

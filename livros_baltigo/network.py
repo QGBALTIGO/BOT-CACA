@@ -42,7 +42,7 @@ def validate_url(url: str, allowed_hosts: frozenset[str] | None = None) -> str:
 
 
 class UnsafeDNS(OSError):
-    """The DNS response points at non-public space; stop before connecting."""
+    """Non-public DNS answers are refused before connecting."""
 
 
 class PublicResolver(aiohttp.abc.AbstractResolver):
@@ -61,13 +61,15 @@ class PublicResolver(aiohttp.abc.AbstractResolver):
         await self.inner.close()
 
 
-def new_session() -> aiohttp.ClientSession:
+def new_session(*, audit_host: str = "") -> aiohttp.ClientSession:
+    from .transport_audit import trace_config
     return aiohttp.ClientSession(
         connector=aiohttp.TCPConnector(resolver=PublicResolver(), limit=20, ttl_dns_cache=60),
         cookie_jar=aiohttp.DummyCookieJar(),
         timeout=aiohttp.ClientTimeout(total=45, connect=10, sock_read=30),
         trust_env=False,
-        headers={"User-Agent": "LivrosBaltigo/0.4 (+Telegram library client)"},
+        trace_configs=[trace_config(audit_host)] if audit_host else [],
+        headers={"User-Agent": "LivrosBaltigo/0.4.1 (+Telegram library client)"},
     )
 
 
