@@ -26,6 +26,7 @@ from .errors import UserError
 from .models import Book, Quota, SearchPage, SearchSpec, to_int
 from .network import limited_body, validate_url
 from .availability import pause_message, retry_after_seconds, network_kind
+from .redirects import APIRedirects
 
 Progress = Callable[[int, int | None], Awaitable[None]]
 
@@ -47,6 +48,7 @@ class ZLibrary:
     def __init__(self, settings: Settings, api_session, file_session):
         self.settings = settings
         self.api = api_session
+        self.api_redirects = APIRedirects(api_session)
         self.files = file_session
         self.base = settings.base_url.rstrip("/")
         self.user_id = settings.user_id
@@ -113,7 +115,7 @@ class ZLibrary:
         self.check_pause()
         url = validate_url(self.base + path)
         try:
-            async with self.api.request(method, url, data=data, headers=self._headers(), allow_redirects=False) as response:
+            async with self.api_redirects.request(method, url, data=data, headers=self._headers()) as response:
                 if response.status == 429:
                     self.pause("rate_limit", retry_after_seconds(response.headers.get("Retry-After")))
                     self.check_pause()
