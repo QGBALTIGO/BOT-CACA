@@ -1,0 +1,4 @@
+aiohttp==3.13.3
+python-dotenv==1.2.2
+filelock==3.29.0
+tzdata==2026.2

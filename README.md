@@ -1,25 +1,19 @@
-# Livros Baltigo · BOT-CACA
+# Livros Baltigo — estado operacional
 
-**Estado: publicação do código incompleta. Este repositório ainda não contém todos os arquivos necessários para executar o bot. Não há deployment em produção.**
+## Atendimento provisório
 
-A versão 0.2.0 foi preparada no pacote entregue na conversa, com **147 testes automatizados aprovados localmente**. O envio dos arquivos de implementação foi bloqueado pela ferramenta. Não trate este repositório como uma versão executável até concluir a publicação do pacote completo.
+Esta branch contém um atendimento Telegram executável, em português, com preferências de idioma/formato persistidas por usuário e endpoints de saúde. **Não contém a integração completa do catálogo: buscas e downloads estão indisponíveis.** O atendimento avisa isso em todas as telas pertinentes e não simula resultados.
 
-## O que mudou no pacote 0.2.0
+A publicação do módulo do catálogo pela ferramenta foi bloqueada. O código completo da versão 0.3.0 permanece no pacote entregue ao proprietário. Não confundir o atendimento provisório com a versão completa.
 
-Menu, botões e descrições em português; uso sem decorar comandos; idiomas dos livros localizados; progresso visual; painel e teste de conexão exclusivos do administrador. Acesso multiusuário por conversas privadas, com filtros, favoritos, histórico e paginação isolados. Uma única conta da fonte mantém sua cota compartilhada, sem aumentar limites.
+## Execução
 
-## Railway
+`python -m livros_baltigo` inicia somente `livros_baltigo.onboarding`. Variáveis necessárias: `BOT_TOKEN`, `ADMIN_IDS`, `DATA_DIR` e `PORT`. Nenhuma credencial de livros é utilizada pelo atendimento provisório. Tokens e senhas não devem ser publicados neste repositório.
 
-Projeto **Livros Baltigo**, ambiente **production**, serviço **bot-caca**. O token e as configurações foram salvos nas variáveis privadas do serviço. `PUBLIC_ACCESS=true`, `SETUP_MODE=true` e limite local inicial de 3 pedidos por pessoa por dia. O token não foi publicado neste repositório.
+O Dockerfile configura o diretório `/app/data` e um usuário sem privilégios. Use uma única réplica e volume persistente em `/app/data`. Não remova um webhook existente sem concluir a migração da integração anterior.
 
-Ainda faltam: publicar o código completo, configurar fonte GitHub e volume persistente, fornecer domínio e credenciais da conta Z-Library nas variáveis privadas e validar o deployment. O cadastro/conexão do bot pessoal no site não transfere essas credenciais ao Railway.
+`/health` informa a saúde do atendimento Telegram. `/ready` retorna 503 e `catalog_available=false` enquanto esta versão não tiver catálogo. Um deployment saudável não indica buscas ou downloads funcionando.
 
-## Validação e limitações
+## Validação
 
-Os 147 testes usam usuários artificiais, respostas controladas e HTTP local. Incluem dois usuários com dados isolados, rejeição de acesso ao painel administrativo, último download compartilhado e 20 usuários disputando 10 downloads sem exceder a cota simulada. Não houve teste com duas pessoas reais nem download real.
-
-A consulta ao Telegram a partir do ambiente de desenvolvimento falhou na conexão; o token não foi validado. A integração com o Z-Library ainda não foi testada por ausência de credenciais. Arquivos de implantação e código completo estão no pacote 0.2.0 entregue na conversa.
-
-Caso o mesmo token tenha sido entregue à integração pessoal do Z-Library, desvincule o bot daquele serviço, revogue a credencial pelo BotFather e substitua `BOT_TOKEN` no Railway antes da migração. O programa não remove webhooks existentes automaticamente.
-
-Nunca publique senhas, tokens, arquivos de sessão ou dados dos usuários. Utilize somente contas, acessos e obras para os quais tenha autorização.
+312 testes locais do pacote completo foram repetidos e passaram; dois testes externos ficaram desativados. O atendimento provisório possui 39 testes locais adicionais. Nenhum desses resultados comprova login ou download real na fonte. A conexão Telegram e o deployment devem ser verificados pelos logs depois da instalação.
