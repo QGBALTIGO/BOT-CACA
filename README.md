@@ -1,19 +1,25 @@
 # Livros Baltigo · BOT-CACA
 
-**Estado: publicação incompleta. Este repositório ainda não contém todos os arquivos necessários para executar o bot. Não há deployment em produção.**
+**Estado: publicação do código incompleta. Este repositório ainda não contém todos os arquivos necessários para executar o bot. Não há deployment em produção.**
 
-A versão 0.1.1 foi preparada e testada localmente, com 111 testes automatizados aprovados. Parte dos arquivos foi enviada; a integração bloqueou outros envios. Não trate este repositório como uma versão executável até a conclusão da publicação.
+A versão 0.2.0 foi preparada no pacote entregue na conversa, com **147 testes automatizados aprovados localmente**. O envio dos arquivos de implementação foi bloqueado pela ferramenta. Não trate este repositório como uma versão executável até concluir a publicação do pacote completo.
+
+## O que mudou no pacote 0.2.0
+
+Menu, botões e descrições em português; uso sem decorar comandos; idiomas dos livros localizados; progresso visual; painel e teste de conexão exclusivos do administrador. Acesso multiusuário por conversas privadas, com filtros, favoritos, histórico e paginação isolados. Uma única conta da fonte mantém sua cota compartilhada, sem aumentar limites.
 
 ## Railway
 
-O projeto **Livros Baltigo**, ambiente **production**, e o serviço **bot-caca** foram criados. Não há imagem implantada nem volume persistente configurado. A tentativa de definir o token pela integração foi bloqueada; ele não está no repositório.
+Projeto **Livros Baltigo**, ambiente **production**, serviço **bot-caca**. O token e as configurações foram salvos nas variáveis privadas do serviço. `PUBLIC_ACCESS=true`, `SETUP_MODE=true` e limite local inicial de 3 pedidos por pessoa por dia. O token não foi publicado neste repositório.
 
-## Implementação preparada
+Ainda faltam: publicar o código completo, configurar fonte GitHub e volume persistente, fornecer domínio e credenciais da conta Z-Library nas variáveis privadas e validar o deployment. O cadastro/conexão do bot pessoal no site não transfere essas credenciais ao Railway.
 
-Busca, filtros, favoritos, histórico, fila de arquivos, cotas por usuário, acesso privado e diagnóstico. O modo de configuração informa explicitamente quando a conta da fonte não está conectada; não simula resultados nem downloads.
+## Validação e limitações
 
-## Limites da validação
+Os 147 testes usam usuários artificiais, respostas controladas e HTTP local. Incluem dois usuários com dados isolados, rejeição de acesso ao painel administrativo, último download compartilhado e 20 usuários disputando 10 downloads sem exceder a cota simulada. Não houve teste com duas pessoas reais nem download real.
 
-Os testes locais utilizam serviços simulados, arquivos artificiais e servidor HTTP local. A conta Z-Library não foi conectada por ausência de credenciais. O token do Telegram não foi validado: a tentativa de conexão a partir do ambiente de desenvolvimento falhou.
+A consulta ao Telegram a partir do ambiente de desenvolvimento falhou na conexão; o token não foi validado. A integração com o Z-Library ainda não foi testada por ausência de credenciais. Arquivos de implantação e código completo estão no pacote 0.2.0 entregue na conversa.
 
-Credenciais e arquivos de sessão nunca devem ser publicados no GitHub. Utilize somente obras e acessos para os quais tenha autorização.
+Caso o mesmo token tenha sido entregue à integração pessoal do Z-Library, desvincule o bot daquele serviço, revogue a credencial pelo BotFather e substitua `BOT_TOKEN` no Railway antes da migração. O programa não remove webhooks existentes automaticamente.
+
+Nunca publique senhas, tokens, arquivos de sessão ou dados dos usuários. Utilize somente contas, acessos e obras para os quais tenha autorização.
