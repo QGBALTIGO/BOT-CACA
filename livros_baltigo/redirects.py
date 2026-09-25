@@ -11,6 +11,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 import asyncio
 import json
 import logging
+import time
 
 import aiohttp
 from yarl import URL
@@ -64,6 +65,7 @@ class APIRedirects:
     def __init__(self, session):
         self.session = session
         self.jar = None
+        self.access_pause = None
 
     def _headers(self, url, headers):
         values = dict(headers or {})
@@ -81,6 +83,8 @@ class APIRedirects:
 
     @asynccontextmanager
     async def request(self, method, url, *, data=None, headers=None):
+        if self.access_pause and self.access_pause[0] > time.monotonic():
+            raise UserError(self.access_pause[1], 'source_protected')
         original = validate_url(url)
         method = method.upper()
         if self.jar is None:
@@ -96,6 +100,30 @@ class APIRedirects:
                 seen.add(state)
                 async with self.session.request(method, current, data=data, headers=values,
                                                 allow_redirects=False) as response:
+                    if response.status in {513, 517}:
+                        # Read only a bounded error excerpt to classify the failure;
+                        # neither the response nor cookies appear in logs or messages.
+                        excerpt = bytearray()
+                        async for part in response.content.iter_chunked(8192):
+                            excerpt.extend(part[:max(0, 65536 - len(excerpt))])
+                            if len(excerpt) >= 65536:
+                                break
+                        wall = b'diamwall' in bytes(excerpt).lower()
+                        message = (
+                            'O site bloqueou a conexão automatizada do bot (DiamWall). '
+                            'A conta ainda não foi validada. É necessário um acesso à API autorizado pelo serviço; '
+                            'isso não é uma confirmação de senha incorreta ou cota esgotada.'
+                            if wall else
+                            f'O site recusou a conexão do bot (HTTP {response.status}). '
+                            'O login não foi confirmado e nenhum livro foi solicitado.'
+                        )
+                        self.access_pause = (time.monotonic() + 300, message)
+                        log.warning('%s', json.dumps({
+                            'event': 'api_access_refused', 'http_status': response.status,
+                            'protection': 'diamwall' if wall else 'not_identified',
+                            'local_pause_seconds': 300, 'files_requested': False,
+                        }))
+                        raise UserError(message, 'source_protected')
                     if response.status not in REDIRECT_CODES:
                         yield response
                         return

@@ -135,3 +135,29 @@ async def test_no_secrets_or_raw_location_in_redirect_logs(caplog):
     for text in ['PRIVATE', 'HIDDEN', 'PASSWORD', 'SECRET']:
         assert text not in caplog.text
     assert 'api_redirect' in caplog.text
+
+
+@pytest.mark.parametrize('status', [513, 517])
+@pytest.mark.parametrize('body,identified', [
+    (b'<html>Access denied by DiamWall; SESSION_SECRET</html>', True),
+    (b'<html>Unexpected refusal SESSION_SECRET</html>', False),
+])
+async def test_terminal_refusal_is_classified_without_retries_or_disclosure(status, body, identified, caplog):
+    session = Session([Response(status=status, body=body)])
+    client = APIRedirects(session)
+    for _ in range(2):
+        with pytest.raises(UserError) as error:
+            async with client.request('POST', BASE, data={'password':'BODY_SECRET'}): pass
+        assert error.value.code == 'source_protected'
+        assert ('DiamWall' in error.value.message) is identified
+        assert 'SESSION_SECRET' not in error.value.message
+    assert len(session.calls) == 1
+    assert 'SESSION_SECRET' not in caplog.text and 'BODY_SECRET' not in caplog.text
+
+
+async def test_refusal_body_is_bounded():
+    response = Response(status=513, body=b'DiamWall' + b'X' * 100000)
+    session = Session([response])
+    with pytest.raises(UserError) as error:
+        async with APIRedirects(session).request('POST',BASE): pass
+    assert error.value.code == 'source_protected'
