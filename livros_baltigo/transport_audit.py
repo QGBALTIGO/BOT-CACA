@@ -7,11 +7,25 @@ from __future__ import annotations
 import json
 import logging
 import time
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urljoin
 import aiohttp
 from .errors import UserError
 
 log = logging.getLogger(__name__)
+
+
+def redirect_summary(location: str, current: str) -> dict:
+    """Only the public destination hostname is retained; no path or query."""
+    if not location:
+        return {}
+    from .network import validate_url
+    try:
+        target = urlsplit(validate_url(urljoin(current, location)))
+        original = urlsplit(current)
+        return {'redirect_host': target.hostname,
+                'redirect_same_origin': (target.hostname, target.port or 443) == (original.hostname, original.port or 443)}
+    except (UserError, ValueError, TypeError):
+        return {'redirect_unsafe': True}
 
 
 def trace_config(host: str) -> aiohttp.TraceConfig:
@@ -37,6 +51,8 @@ def trace_config(host: str) -> aiohttp.TraceConfig:
     async def end(session, ctx, params):
         if not getattr(ctx, 'enabled', False):
             return
+        if 300 <= params.response.status < 400:
+            ctx.state.update(redirect_summary(params.response.headers.get('Location', ''), str(params.url)))
         ctx.state.update(http_status=params.response.status,
                          elapsed_ms=round((time.monotonic() - ctx.started) * 1000))
         log.info('%s', json.dumps(ctx.state))
@@ -75,6 +91,8 @@ async def probe_origin(session, base: str) -> dict:
                                headers={'Accept': 'text/html'},
                                timeout=aiohttp.ClientTimeout(total=12, connect=8)) as response:
             result['http_status'] = response.status
+            if 300 <= response.status < 400:
+                result.update(redirect_summary(response.headers.get('Location', ''), base))
             result['is_html'] = 'text/html' in response.headers.get('Content-Type', '')
     except (aiohttp.ClientError, OSError, ValueError, UserError) as exc:
         error = getattr(exc, 'os_error', None) or exc
