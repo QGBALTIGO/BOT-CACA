@@ -10,23 +10,25 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Inspect public catalog without credentials
+      - name: Inspect public resources without credentials
         run: |
           mkdir -p public-catalog
           python3 - <<'PY'
-          import json, pathlib, time, urllib.request, urllib.parse, urllib.error
-          origin = 'https://dominiopublico.mec.gov.br'
-          params = urllib.parse.urlencode({'co_midia':'2','co_categoria':'','co_idioma':'1','ds_titulo':'Dom Casmurro','no_autor':'','select_action':'Submit','pagina':'1','first':'50','skip':'0'})
-          targets = {'form.html': '/pesquisa/PesquisaObraForm.jsp', 'results.html': '/pesquisa/ResultadoPesquisaObraForm.do?' + params, 'details.html': '/pesquisa/DetalheObraForm.do?co_obra=1888&select_action='}
+          import json, pathlib, time, urllib.request, urllib.error
+          targets = {
+              'mec-dom-casmurro.pdf': 'https://dominiopublico.mec.gov.br/download/texto/bv00180a.pdf',
+              'gutenberg-search.json': 'https://gutendex.com/books/?search=Dom%20Casmurro&languages=pt&copyright=false',
+              'gutenberg-author.json': 'https://gutendex.com/books/?search=Machado&languages=pt&copyright=false',
+          }
           report = []
           class NoRedirect(urllib.request.HTTPRedirectHandler):
               def redirect_request(self, req, fp, code, msg, headers, newurl):
                   return None
           opener = urllib.request.build_opener(NoRedirect())
-          for name, path in targets.items():
+          for name, url in targets.items():
               try:
-                  request = urllib.request.Request(origin + path, headers={'User-Agent':'LivrosBaltigo/0.5 public-catalog-check'})
-                  with opener.open(request, timeout=25) as response:
+                  request = urllib.request.Request(url, headers={'User-Agent':'LivrosBaltigo/0.5 public-catalog-check'})
+                  with opener.open(request, timeout=30) as response:
                       data = response.read(2000001)
                       if len(data) > 2000000:
                           raise ValueError('response_too_large')
