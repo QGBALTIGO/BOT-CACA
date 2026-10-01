@@ -1,0 +1,127 @@
+--- a/livros_baltigo/archive.py
++++ b/livros_baltigo/archive.py
+@@ -49,7 +49,7 @@
+         if p.hostname in {'archive.org', 'www.archive.org'}:
+             good = p.path == '/advancedsearch.php' or p.path.startswith(('/metadata/', '/download/', '/services/img/'))
+         else:
+-            good = bool(re.fullmatch(r'(?:ia|dn)\d+\.[a-z0-9-]+\.archive\.org', p.hostname or '')) and p.path.startswith(('/download/', '/items/', '/0/items/', '/1/items/', '/2/items/', '/3/items/', '/4/items/', '/5/items/', '/6/items/', '/7/items/', '/8/items/', '/9/items/'))
++            good = bool(re.fullmatch(r'(?:ia|dn)\d+\.[a-z0-9-]+\.archive\.org', p.hostname or '')) and (p.path.startswith(('/download/', '/items/')) or bool(re.match(r'^/\d{1,3}/items/', p.path)))
+         if not good:
+             raise UserError('Endereço externo não autorizado pelo Internet Archive.', 'unsafe_url')
+         return url
+--- a/livros_baltigo/omp.py
++++ b/livros_baltigo/omp.py
+@@ -1,4 +1,4 @@
+-"""HTML adapters for university OMP catalogs, with edition-level CC verification."""
++"""HTML adapters for university OMP catalogs and publisher-provided free downloads."""
+ from __future__ import annotations
+ 
+ import asyncio
+@@ -37,7 +37,7 @@
+         candidate = urljoin(self.origin + '/', url)
+         self.safe_url(candidate)
+         p = urlsplit(candidate)
+-        if p.hostname != self.host or not p.path.startswith((self.prefix + '/', '/public/')):
++        if p.hostname != self.host or not p.path.startswith((self.prefix + '/', '/public/', '/press5/public/')):
+             raise UserError('Endereço externo não autorizado nesta fonte.', 'unsafe_url')
+         return candidate
+ 
+@@ -82,8 +82,15 @@
+             raise UserError('O título não foi informado pela fonte.', 'schema')
+         licenses = meta('DC.Rights') + [str(a.get('href', '')) for a in block.select('.item.license a[href]')]
+         license_url = cc_license(licenses)
+-        if not license_url:
+-            raise UserError('Esta edição não informa uma licença aberta verificável.', 'rights_unverified')
++        # UFPB also publishes explicitly free native PDFs with retained copyright,
++        # rather than a Creative Commons license. Accept only its own matching
++        # publisher/copyright metadata AND its advertised citation PDF endpoint.
++        publisher_pdf = (self.source == 'ufpb'
++            and 'Editora UFPB' in meta('DC.Source')
++            and any('Editora UFPB' in value and 'Copyright' in value for value in meta('DC.Rights'))
++            and bool(meta('citation_pdf_url')))
++        if not license_url and not publisher_pdf:
++            raise UserError('Esta edição não informa licença aberta ou download gratuito verificável da editora.', 'rights_unverified')
+         lang = (next(iter(meta('DC.Language')), '') or next(iter(meta('citation_language')), '')).casefold()
+         lang = lang.replace('-', '_').split('_')[0]
+         language = next((name for name, code in LANGS.items() if code == lang), lang)
+@@ -91,7 +98,10 @@
+         author = plain(', '.join(authors), 500) or 'Autor não informado'
+         abstract = block.select_one('.item.abstract .value')
+         description = plain(abstract.get_text(' ', strip=True), 2200) if abstract else ''
+-        description += '\nLicença: ' + license_url
++        description += ('\nLicença: ' + license_url if license_url else
++            '\nDownload disponibilizado pela Editora UFPB. '
++            + plain(' '.join(meta('DC.Rights')), 300)
++            + '. Acesso gratuito não significa domínio público ou licença para redistribuição.')
+         image = block.select_one('.item.cover img[src]')
+         cover = self.allowed_url(str(image['src'])) if image else ''
+         year = next(iter(meta('citation_publication_date')), '')[:4]
+@@ -109,6 +119,8 @@
+             # OMP advertises its viewer; /download is the corresponding file
+             # endpoint also present in citation_pdf_url for the verified edition.
+             url = url.replace('/catalog/view/', '/catalog/download/')
++            if not license_url and (extension != 'pdf' or url not in meta('citation_pdf_url')):
++                continue
+             book = Book(number, 'omp_' + extension, title, author, language, extension,
+                         year=year, publisher=self.name, description=description,
+                         cover=cover, source=self.source,
+@@ -174,9 +186,11 @@
+                     if spec.language == 'any' or spec.language == book.language:
+                         snapshot['books'].append(book)
+             more = len(snapshot['books']) > stop or snapshot['cursor'] < len(snapshot['ids'])
+-            notice = 'Edições abertas da universidade; a licença e a origem constam da ficha.'
++            notice = ('Downloads disponibilizados pela Editora UFPB; direitos e origem na ficha.'
++                      if self.source == 'ufpb' else
++                      'Edições abertas da universidade; a licença e a origem constam da ficha.')
+             if snapshot['skipped']:
+-                notice += ' Fichas sem arquivo integral ou licença aberta foram excluídas.'
++                notice += ' Fichas sem arquivo integral ou acesso verificável foram excluídas.'
+             return SearchPage(snapshot['books'][start:stop], page, more, source=self.source, notice=notice)
+ 
+     async def details(self, book):
+--- a/livros_baltigo/views.py
++++ b/livros_baltigo/views.py
+@@ -240,5 +240,6 @@
+                   '<b>Project Gutenberg</b> oferece EPUB da fonte e PDF diagramado do texto integral, com créditos e licença. '
+                   'O PDF não reproduz a edição impressa. A busca por clássicos é o foco desse catálogo.',
+                   '<b>Internet Archive</b>: arquivos públicos marcados como domínio público, sem empréstimos.',
+-                  '<b>USP e UFPB</b>: livros acadêmicos com licença aberta verificada na ficha.'])
++                  '<b>USP</b>: livros acadêmicos com licença aberta verificada na ficha.',
++                  '<b>UFPB</b>: PDFs gratuitos disponibilizados pela editora; os direitos autorais são preservados.'])
+     return '\n'.join(lines)
+--- a/tests/test_multiple_sources.py
++++ b/tests/test_multiple_sources.py
+@@ -250,3 +250,33 @@
+         assert label in text
+         assert any(button.get('callback_data') == f'setting:source:{name}' for row in rows for button in row)
+     assert all(len(button['callback_data'].encode()) <= 64 for row in rows for button in row)
++
++
++def test_archive_official_multidigit_storage_shard(settings):
++    source = InternetArchive(settings, None, None)
++    url = 'https://ia902807.us.archive.org/24/items/bv00180a/bv00180a.pdf'
++    assert source.allowed_url(url) == url
++
++
++def test_ufpb_publisher_free_pdf_retains_copyright_notice(settings):
++    source = UniversityBooks(settings, None, None, 'ufpb')
++    raw = record_html('ufpb', license=False).replace(b'</head>', (
++        '<meta name="DC.Rights" content="Copyright (c) 2021 Editora UFPB">'
++        '<meta name="DC.Source" content="Editora UFPB">'
++        '<meta name="citation_pdf_url" content="' + source.origin + source.prefix
++        + '/catalog/download/414/2/3"></head>').encode())
++    book, _ = source.parse_record(raw, '414')['pdf']
++    assert 'Copyright (c) 2021 Editora UFPB' in book.description
++    assert 'Acesso gratuito' in book.description
++    assert 'Licença:' not in book.description
++    for invalid in (raw.replace(b'citation_pdf_url', b'other_metadata'),
++                    raw.replace(b'/catalog/download/414/2/3', b'/catalog/download/999/2/3'),
++                    raw.replace(b'Copyright (c) 2021 Editora UFPB', b'Unknown rights')):
++        with pytest.raises(UserError):
++            source.parse_record(invalid, '414')
++
++
++def test_ufpb_actual_public_cover_prefix(settings):
++    source = UniversityBooks(settings, None, None, 'ufpb')
++    url = source.origin + '/press5/public/presses/1/submission_677_cover.jpg'
++    assert source.allowed_url(url) == url
