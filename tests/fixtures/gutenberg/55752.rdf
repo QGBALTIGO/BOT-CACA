@@ -1,0 +1,62 @@
+<!-- Reduced metadata excerpt from the live official RDF, retrieved 2026-10-01. -->
+<r:RDF xmlns:d="http://purl.org/dc/terms/" xmlns:ns3="http://purl.org/dc/dcam/" xmlns:p="http://www.gutenberg.org/2009/pgterms/" xmlns:r="http://www.w3.org/1999/02/22-rdf-syntax-ns#" xml:base="http://www.gutenberg.org/">
+  <p:ebook r:about="ebooks/55752">
+    <d:rights>Public domain in the USA.</d:rights>
+    <d:creator>
+      <p:agent r:about="2009/agents/9685">
+        <p:name>Machado de Assis</p:name>
+        <p:birthdate r:datatype="http://www.w3.org/2001/XMLSchema#integer">1839</p:birthdate>
+        <p:deathdate r:datatype="http://www.w3.org/2001/XMLSchema#integer">1908</p:deathdate>
+        <p:alias>Assis, Joaquim Maria Machado de</p:alias>
+        <p:alias>Assis, Machado de</p:alias>
+        <p:alias>De Assis, Machado</p:alias>
+        <p:webpage r:resource="https://en.wikipedia.org/wiki/Machado_de_Assis" />
+      </p:agent>
+    </d:creator>
+    <d:title>Dom Casmurro</d:title>
+    <d:language>
+      <r:Description r:nodeID="Nfe8a378df79347a3bdf80bedcbf58862">
+        <r:value r:datatype="http://purl.org/dc/terms/RFC4646">pt</r:value>
+      </r:Description>
+    </d:language>
+    <d:hasFormat>
+      <p:file r:about="https://www.gutenberg.org/ebooks/55752.epub3.images">
+        <d:isFormatOf r:resource="ebooks/55752" />
+        <d:extent r:datatype="http://www.w3.org/2001/XMLSchema#integer">220810</d:extent>
+        <d:modified r:datatype="http://www.w3.org/2001/XMLSchema#dateTime">2026-08-22T08:42:47.911403</d:modified>
+        <d:format>
+          <r:Description r:nodeID="N3892eca34312465589ae32fda33b5366">
+            <ns3:memberOf r:resource="http://purl.org/dc/terms/IMT" />
+            <r:value r:datatype="http://purl.org/dc/terms/IMT">application/epub+zip</r:value>
+          </r:Description>
+        </d:format>
+      </p:file>
+    </d:hasFormat>
+    <d:hasFormat>
+      <p:file r:about="https://www.gutenberg.org/ebooks/55752.txt.utf-8">
+        <d:isFormatOf r:resource="ebooks/55752" />
+        <d:extent r:datatype="http://www.w3.org/2001/XMLSchema#integer">418230</d:extent>
+        <d:modified r:datatype="http://www.w3.org/2001/XMLSchema#dateTime">2026-08-22T08:42:40.691458</d:modified>
+        <d:format>
+          <r:Description r:nodeID="Nd212f2bf69ea41ff8c912dfc53b221ff">
+            <ns3:memberOf r:resource="http://purl.org/dc/terms/IMT" />
+            <r:value r:datatype="http://purl.org/dc/terms/IMT">text/plain; charset=utf-8</r:value>
+          </r:Description>
+        </d:format>
+      </p:file>
+    </d:hasFormat>
+    <d:hasFormat>
+      <p:file r:about="https://www.gutenberg.org/cache/epub/55752/pg55752.cover.medium.jpg">
+        <d:isFormatOf r:resource="ebooks/55752" />
+        <d:extent r:datatype="http://www.w3.org/2001/XMLSchema#integer">13039</d:extent>
+        <d:modified r:datatype="http://www.w3.org/2001/XMLSchema#dateTime">2026-08-22T08:42:42.605445</d:modified>
+        <d:format>
+          <r:Description r:nodeID="N265b102ece024dd081012ce3214ed9fe">
+            <ns3:memberOf r:resource="http://purl.org/dc/terms/IMT" />
+            <r:value r:datatype="http://purl.org/dc/terms/IMT">image/jpeg</r:value>
+          </r:Description>
+        </d:format>
+      </p:file>
+    </d:hasFormat>
+  </p:ebook>
+</r:RDF>

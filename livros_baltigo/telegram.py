@@ -10,7 +10,7 @@ from pathlib import Path
 
 import aiohttp
 
-from .errors import TelegramError
+from .errors import TelegramError, UserError
 from .network import limited_body
 
 
@@ -71,13 +71,15 @@ class Telegram:
                 try:
                     payload = json.loads(raw)
                 except (ValueError, UnicodeDecodeError) as exc:
-                    raise TelegramError(response.status, "Resposta inválida") from exc
+                    raise TelegramError(0, "Resposta inválida; resultado da operação desconhecido") from exc
                 if not isinstance(payload, dict) or not payload.get("ok"):
                     code = int(payload.get("error_code", response.status)) if isinstance(payload, dict) else response.status
                     details = payload if isinstance(payload, dict) else {}
                     parameters = details.get("parameters") or {}
                     raise TelegramError(code, str(details.get("description", "")), int(parameters.get("retry_after", 0)))
                 return payload.get("result")
+        except UserError as exc:
+            raise TelegramError(0, "Resposta da Bot API excedeu os limites; resultado desconhecido") from exc
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
             # 0 = resultado desconhecido. Escritas NÃO são repetidas automaticamente.
             raise TelegramError(0, "Falha de rede; resultado da operação desconhecido") from exc

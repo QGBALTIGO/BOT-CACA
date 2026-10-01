@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from .models import Book, SearchPage, esc, clip
-from .catalog import LANGUAGES, FORMATS, BookGroup
+from .catalog import LANGUAGES, FORMATS, SOURCES, BookGroup
 
 
 
@@ -16,7 +16,8 @@ def home_keyboard(admin: bool = False):
         [button("🔎 Buscar livro", "menu:search")],
         [button("📚 Minha biblioteca", "favpage:1"), button("🕘 Histórico", "histpage:1")],
         [button("🌐 Idioma e formato", "menu:settings"), button("📊 Meus limites", "menu:quota")],
-        [button("Como funciona", "menu:help"), button("Privacidade", "menu:privacy")],
+        [button("📂 Fontes", "menu:sources"), button("📄 Testar PDF", "menu:testpdf")],
+        [button("❔ Como funciona", "menu:help"), button("🔒 Privacidade", "menu:privacy")],
     ]
     if admin:
         rows.append([button("Administração", "admin:status"), button("Testar conexão", "admin:check")])
@@ -46,6 +47,9 @@ def book_card(book: Book, detailed: bool = True) -> str:
     bits.append(esc(" · ".join(metadata), 120))
     if book.publisher:
         bits.append(f"Editora: {esc(book.publisher, 70)}")
+    bits.append(f"Fonte: {esc(SOURCES.get(book.source, book.source), 60)}")
+    if book.source == 'gutenberg' and book.extension == 'pdf':
+        bits.append('PDF diagramado do texto integral; não é fac-símile.')
     if detailed and book.description:
         bits.extend(["", esc(book.description, 360)])
     return "\n".join(bits)
@@ -84,6 +88,8 @@ def settings_keyboard(preferences: dict, repeat: bool = False):
     if row:
         rows.append(row)
     rows.append([button(("✓ " if preferences["extension"] == value else "") + title, f"setting:extension:{value}") for value, title in FORMATS.items()])
+    rows.extend([[button(("✓ " if preferences.get('source', 'auto') == value else "") + title, f"setting:source:{value}")]
+                 for value, title in SOURCES.items()])
     if repeat:
         rows.append([button("🔎 Aplicar à última busca", "menu:repeat")])
     rows.append([button("🔎 Nova busca", "menu:search"), button("📚 Início", "menu:home")])
@@ -120,6 +126,7 @@ def progress_text(title: str, received: int, total: int | None) -> str:
 
 
 PUBLIC_ERRORS = {
+    "source_protected": "A fonte recusou o acesso do servidor (HTTP 513). Isso não é falta de saldo. Use outra fonte disponível ou procure a administração.",
     "source_dns": "O endereço do catálogo não respondeu no servidor. O administrador precisa verificar a conexão.",
     "layout_changed": "A página do catálogo mudou de formato. O administrador precisa revisar a integração.",
     "html_auth": "A sessão do catálogo precisa ser verificada pelo administrador.",
@@ -148,6 +155,10 @@ def home_text(brand: str, preferences: dict) -> str:
 def group_results(page: SearchPage, query: str, ident: str, groups: list[BookGroup], targets: list[str], label: str):
     lines = ["🔎 <b>Na estante de resultados</b>", f"<i>{esc(query, 200)}</i>",
              esc(label, 90), f"Página {page.page}", ""]
+    if page.source:
+        lines.append('Fonte: ' + esc(SOURCES.get(page.source, page.source), 60))
+    if page.notice:
+        lines.extend([esc(page.notice, 350), ''])
     rows = []
     if not groups:
         lines += ["<b>Ainda não encontrei essa leitura.</b>",
@@ -183,7 +194,7 @@ def edition_results(books: list[Book], ident: str, page: int = 1):
              f"{len(books)} opções deste resultado · Página {page}", ""]
     rows = []
     for n, b in enumerate(selected, start):
-        fields = [b.extension.upper() or "Formato não informado", language_name(b.language)]
+        fields = [("PDF diagramado" if b.source == 'gutenberg' and b.extension == 'pdf' else b.extension.upper()) or "Formato não informado", language_name(b.language)]
         if b.year:
             fields.append(b.year)
         if b.size is not None:
@@ -201,3 +212,28 @@ def edition_results(books: list[Book], ident: str, page: int = 1):
     rows.append([button("🌐 Filtros", "menu:settings"), button("🔎 Nova busca", "menu:search")])
     rows.append([button("📚 Início", "menu:home")])
     return "\n".join(lines), rows
+
+
+def sources_keyboard(preferences):
+    rows = [[button(('✓ ' if preferences.get('source', 'auto') == value else '') + title,
+                    f'setting:source:{value}')] for value, title in SOURCES.items()]
+    rows.append([button('🔎 Buscar livro', 'menu:search'), button('📚 Início', 'menu:home')])
+    return rows
+
+
+def sources_text(states, preferences):
+    labels = {'ready': 'Consulta respondeu', 'unavailable': 'Indisponível',
+              'not_verified': 'Ainda não verificado', 'not_configured': 'Sem configuração',
+              'disabled': 'Desativado', 'empty_probe': 'Teste respondeu sem encontrar a obra'}
+    lines = ['📂 <b>Seus catálogos de leitura</b>', '',
+             'Selecionado: <b>' + SOURCES.get(preferences.get('source', 'auto'), 'Automático') + '</b>', '']
+    for name in ('gutenberg', 'zlibrary'):
+        item = states.get(name, {'status': 'not_verified'})
+        lines.append('<b>' + SOURCES[name] + '</b> · ' + labels.get(item['status'], 'Ainda não verificado'))
+        if item.get('error') == 'source_protected':
+            lines.append('O servidor da fonte recusou o acesso (HTTP 513). Não é falta de saldo.')
+    lines.extend(['', 'Os catálogos são independentes e não contêm necessariamente os mesmos títulos.',
+                  'No modo Automático, a fonte usada aparece nos resultados e fica fixa durante a paginação.', '',
+                  '<b>Project Gutenberg</b> oferece EPUB da fonte e PDF diagramado do texto integral, com créditos e licença. '
+                  'O PDF não reproduz a edição impressa. A busca por clássicos é o foco desse catálogo.'])
+    return '\n'.join(lines)

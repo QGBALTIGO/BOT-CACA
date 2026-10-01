@@ -7,6 +7,7 @@ import time
 from aiohttp import web
 
 from . import __version__
+from .catalogs import CatalogRouter
 
 
 def health_payload(app) -> dict:
@@ -19,7 +20,8 @@ def health_payload(app) -> dict:
         "catalog_state": getattr(app, "catalog_state", "not_verified"),
         "telegram_polling": poll_ok,
         "worker_alive": bool(worker and not worker.done()),
-        "source": "configured_not_verified" if app.settings.source_configured else "awaiting_credentials",
+        "source": "independent_catalogs" if isinstance(getattr(app, "source", None), CatalogRouter) else ("configured_not_verified" if app.settings.source_configured else "awaiting_credentials"),
+        "catalogs": app.source.states if isinstance(getattr(app, "source", None), CatalogRouter) else {},
     }
 
 
@@ -30,7 +32,10 @@ def create_app(bot) -> web.Application:
         result = health_payload(bot)
         ready = result["status"] == "ok"
         if request.path == "/ready":
-            ready = ready and bot.settings.source_configured and getattr(bot, "catalog_state", "not_verified") == "ready"
+            if isinstance(getattr(bot, "source", None), CatalogRouter):
+                ready = ready and bot.source.state in {"ready", "partial"}
+            else:
+                ready = ready and bot.settings.source_configured and getattr(bot, "catalog_state", "not_verified") == "ready"
         return web.json_response(result, status=200 if ready else 503,
                                  headers={"Cache-Control": "no-store"})
 

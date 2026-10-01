@@ -1,0 +1,30 @@
+{
+  "telegram_delivery_tested": false,
+  "source": "Project Gutenberg",
+  "checks": [
+    {
+      "search": "Dom Casmurro",
+      "results": 2
+    },
+    {
+      "search": "Machado",
+      "results": 8,
+      "pagination": true
+    },
+    {
+      "format": "pdf",
+      "bytes": 482830,
+      "sha256": "d1319f6b79f7c69d3bd30af3bcb551517260422d7e04373bbef672d74103378f",
+      "title": "Dom Casmurro",
+      "source_url": "https://www.gutenberg.org/ebooks/55752"
+    },
+    {
+      "format": "epub",
+      "bytes": 222389,
+      "sha256": "847b26bbc6bfefcf7cc323a94eacefd3c7a9657e66749cb360b77b34a3e994fd",
+      "title": "Dom Casmurro",
+      "source_url": "https://www.gutenberg.org/ebooks/55752"
+    }
+  ],
+  "status": "passed"
+}

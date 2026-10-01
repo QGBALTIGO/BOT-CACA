@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Callable, TypeVar
 
-from .catalog import LANGUAGES, FORMATS
+from .catalog import LANGUAGES, FORMATS, SOURCES
 from .errors import UserError
 from .models import Book, SearchPage, SearchSpec
 
@@ -36,6 +36,11 @@ CREATE TABLE IF NOT EXISTS jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
   book_key TEXT NOT NULL REFERENCES books(key), day TEXT NOT NULL,
   status TEXT NOT NULL, created INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS deliveries (
+  job_id INTEGER PRIMARY KEY REFERENCES jobs(id) ON DELETE CASCADE,
+  chat_id INTEGER NOT NULL, message_id INTEGER NOT NULL, file_id TEXT NOT NULL,
+  file_size INTEGER, sha256 TEXT NOT NULL, confirmed_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_user_day ON jobs(user_id, day, status);
 CREATE INDEX IF NOT EXISTS idx_sessions_expiry ON sessions(expires);
@@ -73,6 +78,11 @@ class Store:
         def initialize(conn):
             conn.execute("PRAGMA journal_mode=WAL")
             conn.executescript(SCHEMA)
+            for table in ("users", "sessions"):
+                columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+                if "source" not in columns:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN source TEXT NOT NULL DEFAULT 'auto'")
+            conn.execute("UPDATE jobs SET status='uncertain' WHERE status='sending'")
             conn.execute("UPDATE jobs SET status='interrupted' WHERE status IN ('queued','running')")
         await self.run(initialize)
         await self.prune()
@@ -84,7 +94,7 @@ class Store:
         return await self.run(action, True)
 
     async def preferences(self, uid: int, field: str, value: str):
-        valid = {"language": LANGUAGES, "extension": FORMATS}
+        valid = {"language": LANGUAGES, "extension": FORMATS, "source": SOURCES}
         if field not in valid or value not in valid[field]:
             raise UserError("Filtro inválido.", "invalid_filter")
         await self.user(uid)
@@ -108,7 +118,8 @@ class Store:
         def action(conn):
             if enabled:
                 count = conn.execute("SELECT count(*) FROM favorites WHERE user_id=?", (uid,)).fetchone()[0]
-                if count >= 1000:
+                already = conn.execute("SELECT 1 FROM favorites WHERE user_id=? AND book_key=?", (uid, key)).fetchone()
+                if count >= 1000 and not already:
                     raise UserError("Sua biblioteca atingiu 1.000 favoritos. Remova algum antes de adicionar.", "favorites_limit")
                 conn.execute("INSERT OR IGNORE INTO favorites VALUES (?,?,?)", (uid, key, int(time.time())))
             else:
@@ -132,19 +143,25 @@ class Store:
 
     async def session(self, uid: int, spec: SearchSpec, ttl: int) -> str:
         ident = secrets.token_hex(6)
-        await self.run(lambda c: c.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?)", (
-            ident, uid, spec.query, spec.language, spec.extension, int(time.time()) + ttl)), True)
+        await self.run(lambda c: c.execute("INSERT INTO sessions(id,user_id,query,language,extension,expires,source) VALUES (?,?,?,?,?,?,?)", (
+            ident, uid, spec.query, spec.language, spec.extension, int(time.time()) + ttl, spec.source)), True)
         return ident
 
     async def get_session(self, uid: int, ident: str) -> SearchSpec | None:
         def action(conn):
             row = conn.execute("SELECT * FROM sessions WHERE id=? AND user_id=? AND expires>?", (ident, uid, int(time.time()))).fetchone()
-            return SearchSpec(row["query"], row["language"], row["extension"]) if row else None
+            return SearchSpec(row["query"], row["language"], row["extension"], row["source"]) if row else None
         return await self.run(action)
+
+    async def pin_session_source(self, uid: int, ident: str, source: str):
+        if source not in SOURCES or source == "auto":
+            raise ValueError("Invalid catalog source")
+        await self.run(lambda c: c.execute("UPDATE sessions SET source=? WHERE id=? AND user_id=? AND expires>?",
+                                          (source, ident, uid, int(time.time()))), True)
 
     async def cache_page(self, key: str, page: SearchPage, ttl: int):
         await self.save_books(page.books)
-        payload = json.dumps({"books": [b.to_dict() for b in page.books], "page": page.page, "has_next": page.has_next, "total": page.total}, ensure_ascii=False)
+        payload = json.dumps({"books": [b.to_dict() for b in page.books], "page": page.page, "has_next": page.has_next, "total": page.total, "source": page.source, "notice": page.notice}, ensure_ascii=False)
         await self.run(lambda c: c.execute("INSERT OR REPLACE INTO search_cache VALUES (?,?,?)", (key, payload, int(time.time()) + ttl)), True)
 
     async def cached_page(self, key: str) -> SearchPage | None:
@@ -153,12 +170,12 @@ class Store:
             if not row:
                 return None
             data = json.loads(row[0])
-            return SearchPage([Book(**b) for b in data["books"]], data["page"], data["has_next"], data["total"])
+            return SearchPage([Book(**b) for b in data["books"]], data["page"], data["has_next"], data["total"], data.get("source", ""), data.get("notice", ""))
         return await self.run(action)
 
     async def reserve_job(self, uid: int, key: str, day: str, limit: int) -> int:
         def action(conn):
-            used = conn.execute("SELECT count(*) FROM jobs WHERE user_id=? AND day=? AND status IN ('queued','running','done','uncertain')", (uid, day)).fetchone()[0]
+            used = conn.execute("SELECT count(*) FROM jobs WHERE user_id=? AND day=? AND status IN ('queued','running','sending','done','uncertain')", (uid, day)).fetchone()[0]
             if used >= limit:
                 raise UserError("Você atingiu seu limite diário local. Consulte /limite.", "local_quota")
             cursor = conn.execute("INSERT INTO jobs(user_id,book_key,day,status,created) VALUES (?,?,?,'queued',?)", (uid, key, day, int(time.time())))
@@ -166,17 +183,38 @@ class Store:
         return await self.run(action, True)
 
     async def job_status(self, ident: int, status: str):
-        if status not in {"queued", "running", "done", "failed", "interrupted", "uncertain"}:
+        if status not in {"queued", "running", "sending", "done", "failed", "interrupted", "uncertain"}:
             raise ValueError("Invalid job status")
         await self.run(lambda c: c.execute("UPDATE jobs SET status=? WHERE id=?", (status, ident)), True)
 
+    async def confirm_delivery(self, ident: int, receipt, sha256: str):
+        """The receipt and final job state commit together; neither is fabricated."""
+        def action(conn):
+            row = conn.execute("SELECT id FROM jobs WHERE id=?", (ident,)).fetchone()
+            if row is None:
+                raise ValueError("Unknown delivery job")
+            conn.execute("INSERT INTO deliveries VALUES (?,?,?,?,?,?,?)", (
+                ident, receipt.chat_id, receipt.message_id, receipt.file_id,
+                receipt.file_size, sha256, int(time.time())))
+            conn.execute("UPDATE jobs SET status='done' WHERE id=?", (ident,))
+        await self.run(action, True)
+
+    async def last_delivery(self, uid: int) -> dict | None:
+        def action(conn):
+            row = conn.execute("SELECT d.message_id,d.chat_id,d.confirmed_at,d.sha256 "
+                               "FROM deliveries d JOIN jobs j ON j.id=d.job_id "
+                               "WHERE j.user_id=? ORDER BY d.confirmed_at DESC,d.job_id DESC LIMIT 1", (uid,)).fetchone()
+            return dict(row) if row else None
+        return await self.run(action)
+
     async def daily_usage(self, uid: int, day: str) -> int:
-        return await self.run(lambda c: c.execute("SELECT count(*) FROM jobs WHERE user_id=? AND day=? AND status IN ('queued','running','done','uncertain')", (uid, day)).fetchone()[0])
+        return await self.run(lambda c: c.execute("SELECT count(*) FROM jobs WHERE user_id=? AND day=? AND status IN ('queued','running','sending','done','uncertain')", (uid, day)).fetchone()[0])
 
     async def stats(self) -> dict:
         return await self.run(lambda c: {
             "users": c.execute("SELECT count(*) FROM users").fetchone()[0],
             "favorites": c.execute("SELECT count(*) FROM favorites").fetchone()[0],
+            "verified_deliveries": c.execute("SELECT count(*) FROM deliveries").fetchone()[0],
             "delivered_30d": c.execute("SELECT count(*) FROM jobs WHERE status='done'").fetchone()[0],
         })
 
@@ -187,7 +225,7 @@ class Store:
             conn.execute("DELETE FROM edition_choices WHERE expires<=?", (now,))
             conn.execute("DELETE FROM search_cache WHERE expires<?", (now,))
             conn.execute("DELETE FROM search_cache WHERE key NOT IN (SELECT key FROM search_cache ORDER BY expires DESC LIMIT 500)")
-            conn.execute("DELETE FROM jobs WHERE created<? AND status NOT IN ('running','queued')", (now - 30 * 86400,))
+            conn.execute("DELETE FROM jobs WHERE created<? AND status NOT IN ('running','queued','sending')", (now - 30 * 86400,))
             conn.execute("DELETE FROM books WHERE updated<? AND key NOT IN (SELECT book_key FROM favorites) AND key NOT IN (SELECT book_key FROM jobs)", (now - 30 * 86400,))
         await self.run(action, True)
 
@@ -210,6 +248,6 @@ class Store:
 
     async def latest_session(self, uid: int) -> SearchSpec | None:
         def action(conn):
-            row = conn.execute("SELECT query,language,extension FROM sessions WHERE user_id=? AND expires>? ORDER BY rowid DESC LIMIT 1", (uid, int(time.time()))).fetchone()
+            row = conn.execute("SELECT query,language,extension,source FROM sessions WHERE user_id=? AND expires>? ORDER BY rowid DESC LIMIT 1", (uid, int(time.time()))).fetchone()
             return SearchSpec(*row) if row else None
         return await self.run(action)

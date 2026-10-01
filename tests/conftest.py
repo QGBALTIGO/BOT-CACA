@@ -114,7 +114,9 @@ class FakeTelegram:
 
     async def document(self, chat, path: Path, filename, caption):
         self.documents.append((chat, path.read_bytes(), filename, caption))
-        return {"document": {"file_id": "FAKE_FILE_ID"}}
+        self.ident += 1
+        return {"message_id": self.ident, "chat": {"id": chat, "type": "private"},
+                "document": {"file_id": "FAKE_FILE_ID", "file_size": path.stat().st_size}}
 
 
 @pytest.fixture

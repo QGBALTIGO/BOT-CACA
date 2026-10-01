@@ -1,27 +1,31 @@
-# Livros Baltigo 0.4.0
+# Livros Baltigo 0.5.0
 
-Bot de livros em português para Telegram. Esta versão substitui o atendimento provisório por um programa com catálogo, pesquisa, edições, favoritos, filtros e fila de arquivos. O sucesso da instalação não comprova a disponibilidade da fonte externa.
+Bot Telegram em português com fontes independentes, busca, seleção de edições, filtros, favoritos, fila e histórico. Instalação ou healthcheck aprovados não comprovam entrega de um arquivo.
 
-## Integração
+## Uso
 
-`python -m livros_baltigo` inicia o aplicativo completo. `BOOK_SOURCE_MODE=html` (padrão) pesquisa e lê detalhes no HTML da origem configurada. Login, consulta da cota e solicitação do arquivo da edição usam a EAPI não oficial. `BOOK_SOURCE_MODE=api` é uma escolha explícita alternativa; não há fallback que contorne bloqueios.
+`/start` abre o menu. Envie título ou autor, escolha a obra e a edição e toque em Receber PDF/EPUB. `/fontes` escolhe Automático, Project Gutenberg ou Z-Library. `/filtros` guarda idioma e formato. `/testarpdf` solicita **Dom Casmurro** no fluxo normal de download e envio, usando o limite diário do usuário que enviou o comando. `/comprovante` mostra apenas a última entrega dessa conta que teve resposta válida do Telegram. Não há mensagem forçada ao reiniciar.
 
-As páginas do site são paginadas localmente, sem descartar edições após os primeiros oito resultados. O programa reconhece cartões `z-bookcard` e alguns cartões legados documentados pela comunidade. Layouts desconhecidos, CAPTCHA, 403, 429 e falhas de autenticação são informados, não tratados como uma busca vazia.
+## Fontes e limites
+
+**Project Gutenberg** usa os feeds oficiais OPDS e RDF, sem credenciais. EPUB é o arquivo da fonte; PDF é uma diagramação do texto integral UTF-8, conservando palavras, parágrafos, créditos e licença, com reorganização das quebras de linha da prosa. Não é fac-símile da edição impressa. Não há tradução, resumo ou geração de conteúdo literário. Caracteres não suportados interrompem a conversão e orientam a escolher EPUB. O catálogo não contém necessariamente os títulos de outros provedores.
+
+**Z-Library** mantém a integração HTML/API anterior, a conta e a cota compartilhada. HTTP 513/403, CAPTCHA, autenticação, mudanças de formato e limites continuam sendo erros reais: esta versão não contorna bloqueios, não descobre espelhos, não troca IP e não amplia cotas. A falha da fonte não impede consultar o catálogo independente. A fonte efetivamente escolhida aparece nos resultados e é fixada na sessão de paginação.
+
+O limite local `DAILY_LIMIT_PER_USER` vale para as duas fontes. Só o Z-Library depende da consulta de saldo da conta. Arquivos têm limite de 49 MB por padrão e são apagados ao final. Conteúdo HTML não é aceito como livro; EPUB precisa ter estrutura válida. A fila não repete envios de resultado incerto.
 
 ## Operação
 
-Fonte GitHub: `QGBALTIGO/BOT-CACA`, branch `main`. Serviço Railway existente: `bot-caca`. Uma réplica, volume persistente `/app/data`, comando `python -m livros_baltigo`, healthcheck `/health`.
+Repositório `QGBALTIGO/BOT-CACA`, serviço Railway `bot-caca`, uma réplica e volume `/app/data`. Comando `python -m livros_baltigo`. `/health` valida o processo, polling e worker. `/ready` exige que ao menos um catálogo tenha passado na consulta; `partial` mostra explicitamente disponibilidade parcial, não funcionamento completo de todas as fontes.
 
-Variáveis privadas: `BOT_TOKEN`, `ADMIN_IDS`, `ZLIB_BASE_URL`, `ZLIB_EMAIL`, `ZLIB_PASSWORD`. Sessão `ZLIB_USER_ID` + `ZLIB_USER_KEY` é alternativa ao login. Não publique segredos. O domínio é o fornecido pelo proprietário, sem descoberta de espelhos.
+Variáveis: `BOT_TOKEN`, `ADMIN_IDS`, `PUBLIC_ACCESS`, `DAILY_LIMIT_PER_USER`, `DATA_DIR`. `GUTENBERG_ENABLED=true` é o padrão. A fonte pública funciona sem credenciais de Z-Library. Credenciais parciais/inválidas dessa fonte continuam sendo erro de configuração. Não envie tokens, senhas ou sessões em mensagens, commits ou logs.
 
-`PUBLIC_ACCESS=true` atende usuários em conversas privadas. Todos compartilham a cota da conta da fonte. `DAILY_LIMIT_PER_USER` apenas restringe o consumo local. Nenhuma cota é ampliada. Hosts externos de arquivo precisam de autorização explícita em `ZLIB_FILE_HOSTS`.
+O banco SQLite é migrado preservando usuários, favoritos, livros e histórico. Envios passam por `queued`, `running`, `sending` e `done` apenas com comprovante válido. Interrupção durante `sending` torna o pedido `uncertain`; não há reenvio automático. Comprovantes registram ID da mensagem, arquivo, destino e SHA-256 local. Contagens antigas de conclusão são separadas das entregas com comprovante. O documento original não precisa ser armazenado após o envio.
 
-No início há um diagnóstico de perfil e busca, sem solicitar arquivo. `/health` mede o processo e o Telegram; `/ready` só responde positivamente após consulta real ao catálogo. Um teste de consulta bem-sucedido não valida downloads. O administrador pode repetir o diagnóstico pelo botão Testar conexão.
+## Verificação reproduzível
 
-## Validação
+`python -m pytest -ra` executa a suíte local, com conexões externas bloqueadas. Os testes de fila e Telegram usam transportes simulados e não devem ser apresentados como entregas reais.
 
-A suíte completa local desta entrega aprovou 333 casos, com dois testes externos desativados. Não confundir arquivos artificiais e HTTP de loopback com testes reais da conta. Os novos testes de regressão do scraper são publicados em `tests/test_scraper_production.py`.
+`python -m livros_baltigo.public_check --output public-verification` executa consultas reais limitadas ao catálogo público, pesquisa por título/autor, verifica paginação, baixa um EPUB e gera um PDF integral. **Não usa Telegram, BOT_TOKEN, credenciais ou conta de usuário.** O relatório registra hashes e tamanhos e declara `telegram_delivery_tested=false`. A comprovação final de entrega exige um pedido real no bot e o registro da resposta `sendDocument`.
 
-Antes desta instalação, o diagnóstico executado no Railway falhou ao conectar à origem, antes do login. A validação da versão completa deve ser acompanhada nos logs (`catalog_probe`); nenhuma credencial ou resposta privada é impressa.
-
-Pesquisa e detalhes podem ficar indisponíveis quando a fonte não responde. Favoritos e filtros permanecem locais e não dependem dessa conexão. Utilize somente acessos e conteúdos autorizados. Não há bypass de DRM, CAPTCHA, bloqueio ou cota.
+Referências primárias: https://www.gutenberg.org/ebooks/offline_catalogs.html ; https://www.gutenberg.org/policy/robot_access.html ; https://core.telegram.org/bots/api#senddocument . O feed OPDS XML está previsto para ser descontinuado em 2027: revisar a integração antes disso. Links, conteúdo e disponibilidade de terceiros podem mudar.

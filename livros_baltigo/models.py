@@ -92,10 +92,15 @@ class Book:
     description: str = ""
     cover: str = ""
     size: int | None = None
+    source: str = "zlibrary"
+    source_url: str = ""
 
     @property
     def key(self) -> str:
-        return hashlib.blake2s(f"{self.id}:{self.hash}".encode(), digest_size=8).hexdigest()
+        identity = f"{self.id}:{self.hash}"
+        if self.source != "zlibrary":
+            identity = f"{self.source}:{identity}"
+        return hashlib.blake2s(identity.encode(), digest_size=8).hexdigest()
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -126,9 +131,10 @@ class SearchSpec:
     query: str
     language: str = "portuguese"
     extension: str = "any"
+    source: str = "auto"
 
     def cache_key(self, page: int, limit: int) -> str:
-        text = f"{self.query.casefold()}|{self.language}|{self.extension}|{page}|{limit}"
+        text = f"v2|{self.source}|{self.query.casefold()}|{self.language}|{self.extension}|{page}|{limit}"
         return hashlib.sha256(text.encode()).hexdigest()
 
 
@@ -138,6 +144,8 @@ class SearchPage:
     page: int
     has_next: bool
     total: int | None = None
+    source: str = ""
+    notice: str = ""
 
 
 @dataclass(frozen=True)

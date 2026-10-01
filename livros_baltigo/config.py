@@ -42,6 +42,7 @@ class Settings:
     search_ttl: int = 900
     session_ttl: int = 3600
     setup_mode: bool = False
+    public_catalog: bool = True
 
     @property
     def source_configured(self) -> bool:
@@ -56,7 +57,7 @@ class Settings:
         if not self.admin_ids:
             raise ValueError("Preencha ADMIN_IDS. O bot não inicia sem administrador.")
         source_values = (self.base_url, self.user_id, self.user_key, self.email, self.password)
-        if not (self.setup_mode and not any(source_values)):
+        if not ((self.setup_mode or self.public_catalog) and not any(source_values)):
             parts = urlsplit(self.base_url)
             if (parts.scheme != "https" or not parts.hostname or parts.username or parts.password
                     or parts.path not in {"", "/"} or parts.query or parts.fragment
@@ -94,8 +95,12 @@ class Settings:
         setup = get("SETUP_MODE", "false").lower()
         if setup not in {"true", "false"}:
             raise ValueError("SETUP_MODE deve ser true ou false.")
+        public_catalog = get("GUTENBERG_ENABLED", "true").lower()
+        if public_catalog not in {"true", "false"}:
+            raise ValueError("GUTENBERG_ENABLED deve ser true ou false.")
         try:
             value = cls(
+                public_catalog=public_catalog == "true",
                 setup_mode=setup == "true",
                 bot_token=get("BOT_TOKEN"), admin_ids=ids(get("ADMIN_IDS")),
                 base_url=get("ZLIB_BASE_URL").rstrip("/"),

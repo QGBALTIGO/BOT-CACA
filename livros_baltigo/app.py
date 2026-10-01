@@ -9,7 +9,9 @@ import time
 import weakref
 
 from . import __version__
-from .catalog import group_books
+from .catalog import group_books, SOURCES
+from .catalogs import CatalogRouter
+from .models import Book
 from collections import OrderedDict
 from .errors import TelegramError, UserError
 from .jobs import Downloads
@@ -21,11 +23,12 @@ from . import views
 
 log = logging.getLogger(__name__)
 COMMANDS = [
-    ("inicio", "Abrir o menu"), ("buscar", "Buscar por título, autor ou ISBN"),
+    ("inicio", "Abrir o menu"), ("fontes", "Escolher e consultar os catálogos"),
+    ("testarpdf", "Receber Dom Casmurro em PDF pelo fluxo real"), ("buscar", "Buscar por título, autor ou ISBN"),
     ("biblioteca", "Minha biblioteca"), ("historico", "Livros enviados nos últimos 30 dias"),
     ("filtros", "Escolher idioma e formato"), ("limites", "Consultar limites"),
     ("id", "Mostrar meu ID"), ("privacidade", "Dados e funcionamento"),
-    ("ajuda", "Como usar o bot"),
+    ("ajuda", "Como usar o bot"), ("comprovante", "Conferir o último envio confirmado"),
 ]
 
 
@@ -61,7 +64,10 @@ class BotApp:
         # Substitui inclusive os menus antigos por idioma deixados por outras integrações.
         for language in ("", "pt", "en", "es"):
             for scope in ({"type": "default"}, {"type": "all_private_chats"}):
-                await self.tg.call("setMyCommands", {"commands": commands, "scope": scope, "language_code": language})
+                try:
+                    await self.tg.call("setMyCommands", {"commands": commands, "scope": scope, "language_code": language})
+                except TelegramError as exc:
+                    log.warning("Menu global pendente: código=%s", exc.code)
         for uid in self.settings.admin_ids:
             for language in ("", "pt", "en", "es"):
                 try:
@@ -85,6 +91,12 @@ class BotApp:
     async def probe_source(self):
         """One bounded startup check; no file request or download."""
         report = {"event": "catalog_probe", "download_tested": False}
+        if isinstance(self.source, CatalogRouter):
+            report.update(await self.source.probe())
+            self.catalog_state = report['status']
+            self.catalog_error = '' if self.catalog_state in {'ready', 'partial'} else 'catalog_unavailable'
+            log.info("Diagnóstico do catálogo: %s", json.dumps(report))
+            return
         try:
             async with asyncio.timeout(40):
                 async with self.source_gate:
@@ -99,20 +111,6 @@ class BotApp:
             self.catalog_state, self.catalog_error = "unavailable", "probe_failed"
             report.update(status="unavailable", error=type(exc).__name__)
         log.info("Diagnóstico do catálogo: %s", json.dumps(report))
-        marker = self.settings.data_dir / ("catalog-notice-" + __version__)
-        if not marker.exists():
-            notice = ("📚 <b>Livros Baltigo atualizado</b>\n\n"
-                      "Busca, escolha de edições, idiomas e favoritos estão instalados.\n\n")
-            notice += ("✅ Consulta real à fonte concluída. Envie um título para começar."
-                       if self.catalog_state == "ready" else
-                       "⚠️ A conexão com a fonte ainda falhou no teste real. Os menus funcionam, mas a busca depende dessa conexão. Consulte Administração → Testar conexão.")
-            for uid in sorted(self.settings.admin_ids)[:1]:
-                try:
-                    await self.tg.message(uid, notice, views.home_keyboard(True))
-                    await asyncio.to_thread(marker.write_text, "sent", encoding="utf-8")
-                except TelegramError as exc:
-                    log.warning("Aviso de atualização pendente: code=%s", exc.code)
-
     async def _send(self, chat: int, text: str, keyboard=None, edit=None):
         if edit and "text" in edit:
             try:
@@ -129,13 +127,16 @@ class BotApp:
         admin = chat in self.settings.admin_ids
         preferences = await self.store.user(chat)
         text = views.home_text(self.settings.brand, preferences)
-        if not self.settings.source_configured:
-            if admin:
-                text += "\n\n<b>Configuração pendente</b>\nAs buscas aguardam ZLIB_BASE_URL e as credenciais da conta nas variáveis privadas do Railway. Use Testar conexão depois de configurá-las."
-            else:
-                text += "\n\n<i>O catálogo está em preparação. As buscas estarão disponíveis assim que a conexão for concluída.</i>"
-        if self.settings.source_configured and self.catalog_state == "unavailable":
-            text += "\n\n⚠️ <i>A conexão com o catálogo está indisponível. Seus favoritos e filtros continuam salvos.</i>"
+        if isinstance(self.source, CatalogRouter):
+            text += "\n\n📂 Fonte: <b>" + esc(SOURCES.get(preferences.get('source', 'auto'), 'Automático')) + "</b>"
+            if self.source.state == 'partial':
+                text += "\n<i>Uma fonte está indisponível. O outro catálogo funciona de forma independente; consulte Fontes.</i>"
+            elif not self.source.available or self.source.state == 'unavailable':
+                text += "\n⚠️ <i>Os catálogos estão indisponíveis. Seus favoritos continuam salvos.</i>"
+        elif not self.settings.source_configured:
+            text += "\n\n<i>O catálogo aguarda configuração do administrador.</i>"
+        elif self.catalog_state == 'unavailable':
+            text += "\n\n⚠️ <i>A conexão com o catálogo está indisponível. Seus favoritos continuam salvos.</i>"
         await self._send(chat, text, views.home_keyboard(admin), edit)
 
     async def show_settings(self, uid: int, chat: int, edit=None):
@@ -143,7 +144,8 @@ class BotApp:
         last = await self.store.latest_session(uid)
         text = ("🌐 <b>Sua leitura, do seu jeito</b>\n\n"
                 f"Idioma: <b>{views.LANGUAGES[preferences['language']]}</b>\n"
-                f"Formato: <b>{views.FORMATS[preferences['extension']]}</b>\n\n"
+                f"Formato: <b>{views.FORMATS[preferences['extension']]}</b>\n"
+                f"Fonte: <b>{SOURCES.get(preferences.get('source', 'auto'), 'Automático')}</b>\n\n"
                 "Toque para escolher. As preferências ficam salvas só para você.\n"
                 "<i>O filtro encontra edições no idioma escolhido; não traduz os livros.</i>")
         if last:
@@ -158,6 +160,8 @@ class BotApp:
             message = await self.tg.message(chat, "🔎 Buscando livros…")
         try:
             result = await self.search_page(spec, page)
+            if result.source in {'gutenberg', 'zlibrary'}:
+                await self.store.pin_session_source(uid, ident, result.source)
             groups = group_books(result.books)
             targets = []
             for group in groups:
@@ -235,7 +239,7 @@ class BotApp:
         if not 1 <= len(query) <= 200:
             raise UserError("Digite um título, autor ou ISBN com até 200 caracteres.", "invalid_query")
         preferences = await self.store.user(uid)
-        spec = SearchSpec(query, preferences["language"], preferences["extension"])
+        spec = SearchSpec(query, preferences["language"], preferences["extension"], preferences.get("source", "auto"))
         ident = await self.store.session(uid, spec, self.settings.session_ttl)
         await self.show_search(uid, chat, spec, ident, edit=edit)
 
@@ -299,9 +303,42 @@ class BotApp:
                               f"Envios nos últimos 30 dias: {stats['delivered_30d']}\n"
                               f"Em execução: {int((time.time() - self.started) / 60)} minutos")
 
+    async def show_sources(self, uid: int, chat: int, edit=None):
+        preferences = await self.store.user(uid)
+        text = views.sources_text(self.source.states if isinstance(self.source, CatalogRouter) else {}, preferences)
+        await self._send(chat, text, views.sources_keyboard(preferences), edit)
+
+    async def test_pdf(self, uid: int, chat: int):
+        """Normal user-requested delivery, with the same queue, quotas, and receipt checks."""
+        if not isinstance(self.source, CatalogRouter):
+            raise UserError("A fonte pública ainda não está instalada neste processo.", "source_disabled")
+        book = Book('55752', 'pg_pdf', 'Dom Casmurro', 'Machado de Assis',
+                    language='portuguese', extension='pdf', source='gutenberg',
+                    source_url='https://www.gutenberg.org/ebooks/55752')
+        self.source.for_book(book)
+        await self.store.save_books([book])
+        progress = await self.tg.message(chat,
+            "📚 Teste real de leitura\n\nDom Casmurro · Project Gutenberg\n"
+            "O PDF será diagramado a partir do texto integral e enviado nesta conversa. "
+            "O pedido usa seu limite diário normal.")
+        try:
+            await self.downloads.enqueue(uid, chat, progress['message_id'], book)
+        except UserError as exc:
+            await self.tg.edit(chat, progress['message_id'], esc(self.friendly_error(uid, exc), 800))
+
     async def check_source(self, uid: int, chat: int):
         if uid not in self.settings.admin_ids:
             raise UserError("Esta função é exclusiva do administrador.", "admin_only")
+        if isinstance(self.source, CatalogRouter):
+            notice = await self.tg.message(chat, "Verificando cada catálogo separadamente, sem solicitar arquivos…")
+            report = await self.source.probe()
+            self.catalog_state = report['status']
+            preferences = await self.store.user(uid)
+            text = views.sources_text(report['sources'], preferences)
+            text += "\n\n<i>Esse teste verifica consulta, não envio de arquivos. Use /testarpdf para testar uma entrega real.</i>"
+            log.info("Diagnóstico solicitado: %s", json.dumps(report))
+            await self._send(chat, text, views.home_keyboard(True), notice)
+            return
         notice = await self.tg.message(chat, "Verificando perfil, cota e busca. Nenhum arquivo será solicitado…")
         try:
             async with self.source_gate:
@@ -330,7 +367,7 @@ class BotApp:
             spec = await self.store.get_session(uid, data.split(":")[1])
             if spec is None:
                 raise UserError("Sua busca expirou. Envie novamente o nome do livro.", "expired_search")
-            broad = SearchSpec(spec.query, "any", spec.extension)
+            broad = SearchSpec(spec.query, "any", spec.extension, spec.source)
             ident = await self.store.session(uid, broad, self.settings.session_ttl)
             await self.show_search(uid, chat, broad, ident, edit=message)
         elif re.fullmatch(r"editions:[a-f0-9]{12}:\d{1,4}", data):
@@ -343,6 +380,10 @@ class BotApp:
             if books is None or not 0 <= index < len(books):
                 raise UserError("Esta edição expirou ou pertence a outra pessoa. Faça uma nova busca.", "expired_search")
             await self.show_book(uid, chat, books[index].key, f"editions:{ident}:{index // 6 + 1}", message)
+        elif data == "menu:sources":
+            await self.show_sources(uid, chat, message)
+        elif data == "menu:testpdf":
+            await self.test_pdf(uid, chat)
         elif data == "menu:settings":
             await self.show_settings(uid, chat, message)
         elif data == "menu:quota":
@@ -389,7 +430,9 @@ class BotApp:
             book = await self.store.book(data.split(":")[1])
             if book is None:
                 raise UserError("Esta edição expirou. Faça uma nova busca.", "expired_book")
-            if not self.settings.source_configured:
+            if isinstance(self.source, CatalogRouter):
+                self.source.for_book(book)
+            elif not self.settings.source_configured:
                 raise UserError(views.PUBLIC_ERRORS["setup_required"], "setup_required")
             progress = await self.tg.message(chat, "📥 Preparando o pedido…")
             try:
@@ -415,19 +458,29 @@ class BotApp:
             await self.show_shelf(uid, chat)
         elif command == "/historico":
             await self.show_shelf(uid, chat, history=True)
+        elif command == "/fontes":
+            await self.show_sources(uid, chat)
+        elif command == "/testarpdf":
+            await self.test_pdf(uid, chat)
         elif command == "/filtros":
             await self.show_settings(uid, chat)
         elif command in {"/limite", "/limites"}:
             await self.show_quota(uid, chat)
         elif command == "/testarfonte":
             await self.check_source(uid, chat)
+        elif command == "/comprovante":
+            receipt = await self.store.last_delivery(uid)
+            text = (f"📤 Último envio confirmado: mensagem <code>{receipt['message_id']}</code>."
+                    if receipt else "Ainda não há um comprovante de envio registrado para você nesta versão.")
+            await self.tg.message(chat, text, views.home_keyboard(uid in self.settings.admin_ids))
         elif command == "/status":
             await self.show_status(uid, chat)
         elif command == "/privacidade":
             await self.tg.message(chat, "<b>Privacidade e funcionamento</b>\n\n"
                                   "Este bot guarda seu ID, filtros, favoritos e histórico local de envios por até 30 dias. "
                                   "Favoritos e filtros persistem até serem removidos pelo administrador. Buscas ficam em sessões por até uma hora e em cache por 15 minutos.\n\n"
-                                  "O Telegram processa as mensagens; a fonte recebe as consultas e solicitações de arquivos usando a conta configurada no servidor. "
+                                  "O Telegram processa mensagens e arquivos. Cada catálogo recebe as consultas direcionadas a ele. "
+                                  "O Project Gutenberg é consultado sem a conta do Z-Library. Comprovantes de entrega são guardados por até 30 dias. "
                                   "Arquivos temporários são apagados ao final de cada pedido. O histórico da conta na fonte não é apagado pelo bot.\n\n"
                                   "Não envie senhas, tokens ou sessões pelo chat. Solicite ao administrador a remoção dos dados locais quando necessário. "
                                   "Use somente conteúdos e acessos para os quais tenha autorização.")
@@ -435,7 +488,8 @@ class BotApp:
             await self.tg.message(chat, "<b>Como usar</b>\n\n"
                                   "Digite um título, autor ou ISBN. Abra uma edição, salve nos favoritos ou solicite o arquivo.\n\n"
                                   "Use os botões Filtros para idioma e formato, Minha biblioteca para favoritos e Meus limites para consultar os downloads disponíveis.\n\n"
-                                  "A busca depende da fonte externa e não garante disponibilidade de todo título. O bot não remove DRM, não contorna CAPTCHA e não aumenta cotas.", views.home_keyboard())
+                                  "Em /fontes você escolhe o catálogo. No Project Gutenberg, EPUB é o arquivo publicado pela fonte e PDF é uma diagramação do texto integral, não uma cópia da edição impressa.\n\n"
+                                  "Use /testarpdf para receber Dom Casmurro pelo fluxo normal e /comprovante para consultar o último envio confirmado. Nenhuma fonte garante todo título.", views.home_keyboard())
 
     async def handle(self, update: dict):
         callback = update.get("callback_query")
@@ -450,8 +504,11 @@ class BotApp:
             if callback:
                 await self.tg.answer(callback["id"], "Use o bot na conversa privada.")
             return
+        log.info("Atendimento recebido: update_id=%s; chat_id=%s; tipo=%s",
+                 update.get("update_id"), chat, "botao" if callback else "mensagem")
         text = str(message.get("text", ""))
         if not callback and text.split(" ")[0].split("@")[0].lower() == "/id":
+            await self.store.user(uid)
             await self.tg.message(chat, f"Seu ID no Telegram: <code>{uid}</code>")
             return
         if not self.settings.allows(uid):

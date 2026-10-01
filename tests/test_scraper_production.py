@@ -83,7 +83,7 @@ async def test_validated_startup_never_downloads(settings,telegram,source,store)
     assert bot.catalog_state=='ready'
     source.file_info.assert_not_called()
     source.download.assert_not_called()
-    assert len(telegram.sent)==1
+    assert len(telegram.sent)==0  # Startup probes must not send unsolicited delivery claims.
 
 async def test_unavailable_source_keeps_menu_usable(settings,telegram,source,store):
     source.quota.side_effect=UserError('Sem conexão','source_dns')

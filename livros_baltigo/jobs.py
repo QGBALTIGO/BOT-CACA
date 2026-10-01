@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import tempfile
 import time
@@ -11,6 +12,9 @@ from zoneinfo import ZoneInfo
 
 from .errors import TelegramError, UserError
 from .models import Book, esc
+from .receipts import document_receipt
+from .catalogs import CatalogRouter
+from .catalog import SOURCES
 from .provider import filename_for
 from . import views
 
@@ -86,14 +90,16 @@ class Downloads:
         sending = False
         try:
             await self.store.job_status(job.id, "running")
-            await self.status(job, "📊 Verificando o limite da conta conectada…")
-            quota = await self.source.quota()
-            if quota.remaining is None or quota.limit < 0 or quota.used < 0:
-                raise UserError("A fonte não informou uma cota válida. O pedido foi pausado para evitar consumo desconhecido.", "quota_unknown")
-            if quota.remaining <= 0:
-                raise UserError("O limite da conta na fonte foi atingido. Consulte /limite.", "quota")
-            await self.status(job, "📥 Solicitando o arquivo à fonte…")
-            url, extension = await self.source.file_info(job.book)
+            provider = self.source.for_book(job.book) if isinstance(self.source, CatalogRouter) else self.source
+            if getattr(provider, "requires_quota", True) is not False:
+                await self.status(job, "📊 Verificando o limite da conta conectada…")
+                quota = await provider.quota()
+                if quota.remaining is None or quota.limit < 0 or quota.used < 0:
+                    raise UserError("A fonte não informou uma cota válida. O pedido foi pausado para evitar consumo desconhecido.", "quota_unknown")
+                if quota.remaining <= 0:
+                    raise UserError("O limite da conta na fonte foi atingido. Consulte /limite.", "quota")
+            await self.status(job, "📥 Solicitando a edição à fonte selecionada…")
+            url, extension = await provider.file_info(job.book)
             self.settings.data_dir.joinpath("tmp").mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix="job-", dir=self.settings.data_dir / "tmp") as folder:
                 path = Path(folder) / f"livro.{extension}"
@@ -105,14 +111,23 @@ class Downloads:
                         return
                     last_edit = now
                     await self.status(job, views.progress_text(job.book.title, received, total))
-                await self.source.download(url, extension, path, progress)
+                await provider.download(url, extension, path, progress)
                 await self.status(job, "📤 Enviando o arquivo ao Telegram…")
+                def file_digest():
+                    with path.open("rb") as handle:
+                        return hashlib.file_digest(handle, "sha256").hexdigest()
+                digest = await asyncio.to_thread(file_digest)
+                await self.store.job_status(job.id, "sending")
                 sending = True
-                await self.tg.document(job.chat, path, filename_for(job.book, extension),
-                                       f"📖 <b>{esc(job.book.title, 160)}</b>\n{esc(job.book.author, 100)}\n\n{extension.upper()} · {esc(views.language_name(job.book.language), 50)}\n🔖 {esc(self.settings.brand, 80)} · Boa leitura!")
+                result = await self.tg.document(job.chat, path, filename_for(job.book, extension),
+                                       f"📖 <b>{esc(job.book.title, 160)}</b>\n{esc(job.book.author, 100)}\n\n{extension.upper()} · {esc(views.language_name(job.book.language), 50)}\nFonte: {esc(SOURCES.get(job.book.source, job.book.source), 60)}"
+                                       + ("\nPDF diagramado a partir do texto integral; não é fac-símile." if job.book.source == "gutenberg" and extension == "pdf" else "")
+                                       + f"\n🔖 {esc(self.settings.brand, 80)} · Boa leitura!")
+                receipt = document_receipt(result, job.chat)
                 delivered = True
-                await self.store.job_status(job.id, "done")
-                await self.status(job, "✅ Livro enviado. Boa leitura!\nEle já aparece no Histórico do seu menu.")
+                await self.store.confirm_delivery(job.id, receipt, digest)
+                log.info("Entrega confirmada: job_id=%s; message_id=%s; bytes=%s", job.id, receipt.message_id, path.stat().st_size)
+                await self.status(job, f"✅ Livro enviado. Boa leitura!\nComprovante Telegram: mensagem {receipt.message_id}.\nO livro já aparece no Histórico.")
         except asyncio.CancelledError:
             await self.store.job_status(job.id, "done" if delivered else ("uncertain" if sending else "interrupted"))
             raise
@@ -121,7 +136,7 @@ class Downloads:
             message = exc.message if job.user_id in self.settings.admin_ids else views.PUBLIC_ERRORS.get(exc.code, exc.message)
             await self.status(job, f"Não foi possível concluir.\n\n{esc(message, 800)}")
         except TelegramError as exc:
-            uncertain = sending and exc.code == 0
+            uncertain = sending and (exc.code == 0 or exc.code >= 500)
             await self.store.job_status(job.id, "uncertain" if uncertain else "failed")
             if uncertain:
                 text = "A confirmação do Telegram não chegou. Confira se o arquivo apareceu na conversa antes de solicitar novamente. Não repetirei o envio automaticamente."
@@ -130,8 +145,11 @@ class Downloads:
             await self.status(job, text)
             log.warning("Entrega falhou: Telegram code=%s", exc.code)
         except Exception as exc:
-            await self.store.job_status(job.id, "done" if delivered else "failed")
-            await self.status(job, "O pedido encontrou uma falha interna. O administrador pode verificar o diagnóstico do serviço.")
+            # A crash after beginning the write must not invite an automatic duplicate.
+            await self.store.job_status(job.id, "done" if delivered else ("uncertain" if sending else "failed"))
+            text = ("O envio ocorreu, mas houve uma falha ao salvar seu comprovante. Confira a conversa."
+                    if delivered else "O pedido encontrou uma falha interna. Confira a conversa antes de pedir novamente.")
+            await self.status(job, text)
             log.error("Falha no worker: %s", type(exc).__name__)
 
     async def _work(self):

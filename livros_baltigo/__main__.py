@@ -17,7 +17,8 @@ from .errors import TelegramError, UserError
 from .network import new_session
 from .provider import ZLibrary
 from .scraper import HTMLSource
-from .transport_audit import probe_origin
+from .gutenberg import Gutenberg
+from .catalogs import CatalogRouter
 from urllib.parse import urlsplit
 from .storage import Store
 from .telegram import Telegram
@@ -25,23 +26,23 @@ from .runtime import prepare_data
 
 
 async def execute(settings: Settings, doctor=False):
-    async with new_session(audit_host=urlsplit(settings.base_url).hostname or "") as api, new_session() as files, new_session() as telegram_session:
+    async with new_session(audit_host=urlsplit(settings.base_url).hostname or "") as api, new_session() as files, new_session() as telegram_session, new_session() as public_api, new_session() as public_files:
         telegram = Telegram(settings.bot_token, telegram_session)
         mode = os.getenv("BOOK_SOURCE_MODE", "html").lower().strip()
         if mode not in {"html", "api"}:
             raise ValueError("BOOK_SOURCE_MODE deve ser html ou api")
-        source = (HTMLSource if mode == "html" else ZLibrary)(settings, api, files)
-        if settings.source_configured:
-            await probe_origin(api, settings.base_url)
+        legacy = (HTMLSource if mode == "html" else ZLibrary)(settings, api, files)
+        source = CatalogRouter(settings, legacy, Gutenberg(settings, public_api, public_files))
         if doctor:
             me = await telegram.call("getMe")
             print(f"Telegram: conectado a @{me.get('username', '(sem username)')}")
             webhook = await telegram.call("getWebhookInfo")
             if webhook.get("url"):
                 raise UserError("Existe um webhook ativo. Não inicie polling com esse token sem revisar a integração.")
-            quota = await source.quota()
-            print("Z-Library: resposta de perfil reconhecida.")
-            print(f"Cota restante informada: {quota.remaining if quota.remaining is not None else 'não informada'}")
+            report = await source.probe()
+            print(json.dumps(report, ensure_ascii=False))
+            if report['status'] not in {'ready', 'partial'}:
+                raise UserError("Nenhum catálogo passou no diagnóstico de consulta.", "catalog_unavailable")
             print("Diagnóstico concluído. Nenhum livro foi solicitado ou baixado.")
             return
         temporary = settings.data_dir / "tmp"

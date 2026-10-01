@@ -42,6 +42,7 @@ def pause_message(code: str, remaining: int = 0) -> str:
         'source_tls': 'Não foi possível estabelecer uma conexão segura com o catálogo. A validação de segurança foi mantida.',
         'source_timeout': 'O catálogo não respondeu dentro do tempo de espera.',
         'rate_limit': 'O catálogo limitou temporariamente as consultas (HTTP 429).',
+        'source_protected': 'A fonte recusou o acesso do servidor (HTTP 513). Aguardar não garante a liberação. Escolha outra fonte disponível ou procure a administração.',
         'blocked': 'O catálogo recusou a consulta (HTTP 403). O administrador precisa verificar o acesso.',
         'auth': 'O catálogo não aceitou a sessão. O administrador precisa verificar o acesso à conta.',
         'html_auth': 'A sessão do catálogo precisa ser verificada pelo administrador.',
