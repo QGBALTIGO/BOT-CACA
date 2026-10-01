@@ -1,0 +1,302 @@
+diff --git a/livros_baltigo/__init__.py b/livros_baltigo/__init__.py
+index 3fdc89e..d559dd3 100644
+--- a/livros_baltigo/__init__.py
++++ b/livros_baltigo/__init__.py
+@@ -1,2 +1,2 @@
+ """Livros Baltigo — biblioteca no Telegram."""
+-__version__ = "0.5.0"
++__version__ = "0.5.1"
+diff --git a/livros_baltigo/__main__.py b/livros_baltigo/__main__.py
+index 1074bcf..cf61f23 100644
+--- a/livros_baltigo/__main__.py
++++ b/livros_baltigo/__main__.py
+@@ -19,6 +19,8 @@ from .provider import ZLibrary
+ from .scraper import HTMLSource
+ from .gutenberg import Gutenberg
+ from .catalogs import CatalogRouter
++from .archive import InternetArchive
++from .omp import UniversityBooks
+ from urllib.parse import urlsplit
+ from .storage import Store
+ from .telegram import Telegram
+@@ -32,7 +34,10 @@ async def execute(settings: Settings, doctor=False):
+         if mode not in {"html", "api"}:
+             raise ValueError("BOOK_SOURCE_MODE deve ser html ou api")
+         legacy = (HTMLSource if mode == "html" else ZLibrary)(settings, api, files)
+-        source = CatalogRouter(settings, legacy, Gutenberg(settings, public_api, public_files))
++        extra = {name: (InternetArchive(settings, public_api, public_files) if name == "archive"
++                        else UniversityBooks(settings, public_api, public_files, name))
++                 for name in settings.extra_catalogs}
++        source = CatalogRouter(settings, legacy, Gutenberg(settings, public_api, public_files), extra)
+         if doctor:
+             me = await telegram.call("getMe")
+             print(f"Telegram: conectado a @{me.get('username', '(sem username)')}")
+diff --git a/livros_baltigo/app.py b/livros_baltigo/app.py
+index 3ef66e4..620c6b3 100644
+--- a/livros_baltigo/app.py
++++ b/livros_baltigo/app.py
+@@ -130,7 +130,7 @@ class BotApp:
+         if isinstance(self.source, CatalogRouter):
+             text += "\n\n📂 Fonte: <b>" + esc(SOURCES.get(preferences.get('source', 'auto'), 'Automático')) + "</b>"
+             if self.source.state == 'partial':
+-                text += "\n<i>Uma fonte está indisponível. O outro catálogo funciona de forma independente; consulte Fontes.</i>"
++                text += "\n<i>Há fontes indisponíveis. Os demais catálogos funcionam de forma independente; consulte Fontes.</i>"
+             elif not self.source.available or self.source.state == 'unavailable':
+                 text += "\n⚠️ <i>Os catálogos estão indisponíveis. Seus favoritos continuam salvos.</i>"
+         elif not self.settings.source_configured:
+@@ -160,7 +160,7 @@ class BotApp:
+             message = await self.tg.message(chat, "🔎 Buscando livros…")
+         try:
+             result = await self.search_page(spec, page)
+-            if result.source in {'gutenberg', 'zlibrary'}:
++            if result.source in SOURCES and result.source != 'auto':
+                 await self.store.pin_session_source(uid, ident, result.source)
+             groups = group_books(result.books)
+             targets = []
+@@ -174,7 +174,8 @@ class BotApp:
+                 f"{views.LANGUAGES[spec.language]} · {views.FORMATS[spec.extension]}")
+             await self._send(chat, text, keyboard, message)
+         except UserError as exc:
+-            await self._send(chat, esc(self.friendly_error(uid, exc), 1000), views.home_keyboard(), message)
++            await self._send(chat, esc(self.friendly_error(uid, exc), 1000),
++                [[views.button("📂 Tentar outra fonte", f"searchsources:{ident}")]] + views.home_keyboard(), message)
+ 
+     async def search_page(self, spec: SearchSpec, page: int):
+         key = spec.cache_key(page, self.settings.page_size)
+@@ -363,6 +364,27 @@ class BotApp:
+             if not last:
+                 raise UserError("Sua busca expirou. Envie novamente o nome do livro.", "expired_search")
+             await self.new_search(uid, chat, last.query, edit=message)
++        elif re.fullmatch(r"searchsources:[a-f0-9]{12}", data):
++            ident = data.split(":")[1]
++            spec = await self.store.get_session(uid, ident)
++            if spec is None:
++                raise UserError("Esta busca expirou ou pertence a outra pessoa.", "expired_search")
++            enabled = self.source.enabled if isinstance(self.source, CatalogRouter) else {"zlibrary"}
++            rows = [[views.button(label, f"searchvia:{ident}:{name}")]
++                    for name, label in SOURCES.items() if name in enabled or name == "auto"]
++            rows.append([views.button("📚 Início", "menu:home")])
++            await self._send(chat, "📂 <b>Buscar o mesmo título em outra fonte</b>\n\n"
++                + esc(spec.query, 200) + "\n\nEscolha o catálogo. Seu título e seus filtros serão mantidos.", rows, message)
++        elif re.fullmatch(r"searchvia:[a-f0-9]{12}:[a-z]+", data):
++            _, old_ident, source = data.split(":")
++            spec = await self.store.get_session(uid, old_ident)
++            if spec is None:
++                raise UserError("Esta busca expirou ou pertence a outra pessoa.", "expired_search")
++            if source not in SOURCES:
++                raise UserError("Fonte inválida.", "invalid_source")
++            new_spec = SearchSpec(spec.query, spec.language, spec.extension, source)
++            ident = await self.store.session(uid, new_spec, self.settings.session_ttl)
++            await self.show_search(uid, chat, new_spec, ident, edit=message)
+         elif re.fullmatch(r"searchall:[a-f0-9]{12}", data):
+             spec = await self.store.get_session(uid, data.split(":")[1])
+             if spec is None:
+diff --git a/livros_baltigo/archive.py b/livros_baltigo/archive.py
+new file mode 100644
+index 0000000..4405672
+--- /dev/null
++++ b/livros_baltigo/archive.py
+@@ -0,0 +1,188 @@
++"""Internet Archive public-domain texts only; no loans, login, or DRM removal."""
++from __future__ import annotations
++
++import asyncio
++import re
++import time
++from collections import OrderedDict
++from dataclasses import replace
++from urllib.parse import quote, urlencode, urlsplit
++
++from .errors import UserError
++from .gutenberg import LANGS
++from .models import Book, SearchPage, plain, to_int
++from .open_http import OpenHTTP, cc_license, read_json
++
++BASE = 'https://archive.org'
++IA_LANGS = {'portuguese': 'por', 'english': 'eng', 'spanish': 'spa', 'french': 'fre',
++            'italian': 'ita', 'german': 'ger', 'russian': 'rus', 'chinese': 'chi', 'japanese': 'jpn'}
++IDENT = r'[A-Za-z0-9][A-Za-z0-9_.-]{0,99}'
++
++
++def values(value):
++    return value if isinstance(value, list) else [value] if value is not None else []
++
++
++def public_domain(metadata):
++    license_url = cc_license(values(metadata.get('licenseurl')))
++    return bool(license_url and '/publicdomain/' in license_url)
++
++
++def restricted(metadata):
++    return str(metadata.get('access-restricted-item', '')).lower() in {'true', '1'} or any(
++        tag in {'inlibrary', 'printdisabled', 'borrowable', 'stream_only'} for tag in values(metadata.get('collection')))
++
++
++class InternetArchive(OpenHTTP):
++    source = 'archive'
++    probe_query = 'Dom Casmurro'
++
++    def __init__(self, settings, session, files):
++        super().__init__(settings, session, files)
++        self.pages = OrderedDict()
++        self.records = OrderedDict()
++        self.record_lock = asyncio.Lock()
++
++    def allowed_url(self, url):
++        self.safe_url(url)
++        p = urlsplit(url)
++        if p.hostname in {'archive.org', 'www.archive.org'}:
++            good = p.path == '/advancedsearch.php' or p.path.startswith(('/metadata/', '/download/', '/services/img/'))
++        else:
++            good = bool(re.fullmatch(r'(?:ia|dn)\d+\.[a-z0-9-]+\.archive\.org', p.hostname or '')) and p.path.startswith(('/download/', '/items/', '/0/items/', '/1/items/', '/2/items/', '/3/items/', '/4/items/', '/5/items/', '/6/items/', '/7/items/', '/8/items/', '/9/items/'))
++        if not good:
++            raise UserError('Endereço externo não autorizado pelo Internet Archive.', 'unsafe_url')
++        return url
++
++    def parse_search(self, raw, spec):
++        data = read_json(raw)
++        response = data.get('response')
++        if not isinstance(response, dict) or not isinstance(response.get('docs'), list):
++            raise UserError('A busca Archive mudou de formato.', 'schema')
++        total = to_int(response.get('numFound'))
++        if total is None or total < 0:
++            raise UserError('O catálogo não informou uma contagem válida.', 'schema')
++        books, seen = [], set()
++        for row in response['docs']:
++            number = row.get('identifier', '')
++            if not isinstance(number, str) or not re.fullmatch(IDENT, number):
++                raise UserError('Identificação Archive inválida.', 'schema')
++            if number in seen or not public_domain(row) or restricted(row):
++                continue
++            seen.add(number)
++            title = plain(row.get('title'), 500)
++            if not title:
++                raise UserError('Obra Archive sem título.', 'schema')
++            lang = next(iter(values(row.get('language'))), '')
++            language = next((name for name in IA_LANGS if str(lang).casefold() in {IA_LANGS[name], LANGS[name], name}), str(lang))
++            if spec.language != 'any' and language != spec.language:
++                continue
++            formats = [str(v).casefold() for v in values(row.get('format'))]
++            for extension in ('pdf', 'epub'):
++                present = any((fmt in {'pdf', 'text pdf', 'image container pdf', 'additional text pdf'} if extension == 'pdf' else fmt == 'epub') for fmt in formats)
++                if not present or spec.extension not in {'any', extension}:
++                    continue
++                books.append(Book(number, 'ia_' + extension, title,
++                    plain(row.get('creator'), 500) or 'Autor não informado', language, extension,
++                    year=plain(row.get('year'), 12), publisher='Internet Archive',
++                    description='Obra identificada como domínio público pela fonte. Edições para empréstimo não são oferecidas.',
++                    source='archive', source_url=BASE + '/details/' + number))
++        return books, total
++
++    async def search(self, spec, page=1, limit=8):
++        if spec.language not in {*IA_LANGS, 'any'} or spec.extension not in {'any', 'pdf', 'epub'}:
++            raise UserError('Filtro Archive inválido.', 'invalid_filter')
++        if not 1 <= page <= 1000 or not 1 <= limit <= 10 or not 1 <= len(spec.query.strip()) <= 200:
++            raise UserError('Busca Archive inválida.', 'invalid_search')
++        terms = ' AND '.join(re.findall(r'\w+', spec.query, re.UNICODE))
++        if not terms:
++            return SearchPage([], page, False, source='archive')
++        query = (f'mediatype:texts AND (title:({terms}) OR creator:({terms})) '
++                 'AND licenseurl:*publicdomain* AND -collection:inlibrary '
++                 'AND -collection:printdisabled AND -access-restricted-item:true')
++        if spec.language != 'any':
++            query += f' AND (language:{IA_LANGS[spec.language]} OR language:{LANGS[spec.language]})'
++        offset = (page - 1) * limit
++        selected, fetched = [], 0
++        for source_page in range(1, 151):
++            key = (query, spec.extension, source_page)
++            cached = self.pages.get(key)
++            if cached and cached[0] > time.monotonic():
++                books, total = cached[1:]
++            else:
++                if fetched >= 3:
++                    raise UserError('A paginação anterior expirou. Refaça a busca.', 'expired_search')
++                params = {'q': query, 'output': 'json', 'rows': 25, 'page': source_page,
++                          'sort[]': 'identifier asc',
++                          'fl[]': 'identifier,title,creator,language,licenseurl,rights,format,year,collection,access-restricted-item'}
++                raw, _ = await self._get(BASE + '/advancedsearch.php?' + urlencode(params))
++                books, total = self.parse_search(raw, spec)
++                self.pages[key] = (time.monotonic() + self.settings.search_ttl, books, total)
++                fetched += 1
++                while len(self.pages) > 128:
++                    self.pages.popitem(last=False)
++            more = source_page * 25 < total
++            if offset >= len(books):
++                offset -= len(books)
++            else:
++                take = min(limit - len(selected), len(books) - offset)
++                selected.extend(books[offset:offset + take])
++                offset += take
++                if len(selected) == limit:
++                    return SearchPage(selected, page, offset < len(books) or more, source='archive')
++                offset = 0
++            if not more:
++                return SearchPage(selected, page, False, source='archive')
++        raise UserError('Refine a busca do Archive.', 'invalid_page')
++
++    def parse_record(self, raw, book):
++        data = read_json(raw)
++        metadata = data.get('metadata')
++        if not isinstance(metadata, dict) or metadata.get('identifier') != book.id:
++            raise UserError('A ficha Archive não corresponde à obra escolhida.', 'schema')
++        if restricted(metadata) or data.get('is_dark') or not public_domain(metadata):
++            raise UserError('Esta edição não é um arquivo público de domínio público. Empréstimos e arquivos restritos não são oferecidos.', 'rights_unverified')
++        files = data.get('files')
++        if not isinstance(files, list):
++            raise UserError('A fonte não informou os arquivos da obra.', 'schema')
++        choices = []
++        for file in files:
++            name = file.get('name', '')
++            if (not isinstance(name, str) or not name.lower().endswith('.' + book.extension)
++                    or str(file.get('private', '')).lower() in {'true', '1'}
++                    or 'encrypted' in str(file.get('format', '')).lower()):
++                continue
++            size = to_int(file.get('size'))
++            if size is not None and 0 < size <= self.settings.max_file_bytes:
++                choices.append((size, name))
++        if not choices:
++            raise UserError('Nenhum arquivo deste formato cabe no limite do bot. Escolha outra edição.', 'file_missing')
++        size, name = min(choices)
++        url = self.allowed_url(BASE + '/download/' + book.id + '/' + quote(name, safe=''))
++        license_url = cc_license(values(metadata.get('licenseurl')))
++        fresh = replace(book, title=plain(metadata.get('title'), 500) or book.title,
++            author=plain(metadata.get('creator'), 500) or book.author,
++            description=plain(metadata.get('description'), 2200) + '\nLicença: ' + license_url,
++            size=size, cover=BASE + '/services/img/' + book.id)
++        return fresh, url
++
++    async def _record(self, book):
++        if book.source != 'archive' or not re.fullmatch(IDENT, book.id) or book.extension not in {'pdf', 'epub'}:
++            raise UserError('Edição Archive inválida.', 'invalid_book')
++        async with self.record_lock:
++            cached = self.records.get(book.key)
++            if cached and cached[0] > time.monotonic():
++                return cached[1:]
++            raw, _ = await self._get(BASE + '/metadata/' + book.id)
++            fresh, url = self.parse_record(raw, book)
++            self.records[book.key] = (time.monotonic() + 21600, fresh, url)
++            while len(self.records) > 128:
++                self.records.popitem(last=False)
++            return fresh, url
++
++    async def details(self, book):
++        return (await self._record(book))[0]
++
++    async def file_info(self, book):
++        fresh, url = await self._record(book)
++        return url, fresh.extension
+diff --git a/livros_baltigo/catalog.py b/livros_baltigo/catalog.py
+index 145fbe4..38f6dc8 100644
+--- a/livros_baltigo/catalog.py
++++ b/livros_baltigo/catalog.py
+@@ -13,7 +13,9 @@ LANGUAGES = {
+     "japanese": "Japonês", "chinese": "Chinês", "russian": "Russo",
+     "any": "Todos os idiomas",
+ }
+-SOURCES = {"auto": "Automático", "gutenberg": "Project Gutenberg", "zlibrary": "Z-Library"}
++SOURCES = {"auto": "Automático", "gutenberg": "Project Gutenberg",
++           "archive": "Internet Archive", "usp": "Livros Abertos USP",
++           "ufpb": "Editora UFPB", "zlibrary": "Z-Library"}
+ FORMATS = {"any": "EPUB e PDF", "epub": "EPUB", "pdf": "PDF"}
+ 
+ 
