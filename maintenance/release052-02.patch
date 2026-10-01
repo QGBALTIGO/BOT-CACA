@@ -1,0 +1,225 @@
+diff --git a/livros_baltigo/interface.py b/livros_baltigo/interface.py
+new file mode 100644
+index 0000000..1cbe9f5
+--- /dev/null
++++ b/livros_baltigo/interface.py
+@@ -0,0 +1,56 @@
++"""Synchronize optional Telegram metadata once; honor rate limits across restarts."""
++from __future__ import annotations
++import hashlib
++import json
++import logging
++import time
++from .errors import TelegramError
++
++log = logging.getLogger(__name__)
++
++
++async def sync_interface(telegram, settings, commands, bot_id):
++    operations = []
++    for language in ('', 'pt', 'en', 'es'):
++        for scope in ({'type': 'default'}, {'type': 'all_private_chats'}):
++            operations.append(('setMyCommands', {'commands': commands, 'scope': scope, 'language_code': language}))
++    for uid in sorted(settings.admin_ids):
++        for language in ('', 'pt', 'en', 'es'):
++            operations.append(('setMyCommands', {'commands': commands, 'scope': {'type': 'chat', 'chat_id': uid}, 'language_code': language}))
++    for method, field, text in (
++        ('setMyName', 'name', settings.brand[:64]),
++        ('setMyDescription', 'description', 'Sua próxima leitura começa aqui. Busque por título ou autor, salve seus favoritos e receba edições disponíveis em EPUB ou PDF. Tudo pelos botões, em português.'),
++        ('setMyShortDescription', 'short_description', 'Livros, favoritos e novas leituras. Busque pelo título ou autor, sem precisar decorar comandos.'),
++    ):
++        for language in ('', 'pt', 'en', 'es'):
++            operations.append((method, {field: text, 'language_code': language}))
++    fingerprint = hashlib.sha256(json.dumps([bot_id, operations], sort_keys=True).encode()).hexdigest()
++    path = settings.data_dir / 'interface-state.json'
++    try:
++        state = json.loads(path.read_text())
++        if ((state.get('fingerprint') == fingerprint or (state.get('bot_id') == bot_id and state.get('rate_limited')))
++                and state.get('retry_at', 0) > time.time()):
++            return
++    except (OSError, ValueError, TypeError, AttributeError):
++        state = {}
++    complete = True
++    rate_limited = False
++    retry_at = time.time() + 86400
++    for method, payload in operations:
++        try:
++            await telegram.call(method, payload)
++        except TelegramError as exc:
++            complete = False
++            log.warning('Interface opcional pendente: method=%s; code=%s', method, exc.code)
++            if exc.code == 429:
++                rate_limited = True
++                # Do not hammer other locales or restart to evade Retry-After.
++                retry_at = time.time() + max(60, exc.retry_after)
++                break
++            retry_at = time.time() + 3600
++    try:
++        temporary = path.with_suffix('.tmp')
++        temporary.write_text(json.dumps({'fingerprint': fingerprint, 'bot_id': bot_id, 'complete': complete, 'retry_at': retry_at, 'rate_limited': rate_limited}))
++        temporary.replace(path)
++    except OSError:
++        log.warning('Cache de interface indisponível; atendimento permanece ativo.')
+diff --git a/livros_baltigo/multisource_check.py b/livros_baltigo/multisource_check.py
+index 76b89a3..061e8f1 100644
+--- a/livros_baltigo/multisource_check.py
++++ b/livros_baltigo/multisource_check.py
+@@ -14,18 +14,20 @@ from .gutenberg import Gutenberg
+ from .models import SearchSpec
+ from .network import new_session
+ from .omp import UniversityBooks
++from .infolivros import InfoLivros
+ 
+ 
+ async def verify(output: Path):
+     output.mkdir(parents=True, exist_ok=True)
+     settings = Settings(bot_token='', admin_ids=frozenset(), base_url='', data_dir=output)
+-    report = {'version': '0.5.1', 'telegram_delivery_tested': False,
++    report = {'version': '0.5.2', 'telegram_delivery_tested': False,
+               'account_credentials_used': False, 'sources': {}, 'status': 'failed'}
+     async with new_session() as session, new_session() as files:
+         sources = {'gutenberg': Gutenberg(settings, session, files),
+                    'archive': InternetArchive(settings, session, files),
+                    'usp': UniversityBooks(settings, session, files, 'usp'),
+-                   'ufpb': UniversityBooks(settings, session, files, 'ufpb')}
++                   'ufpb': UniversityBooks(settings, session, files, 'ufpb'),
++                   'infolivros': InfoLivros(settings, session, files)}
+         for name, provider in sources.items():
+             result = {'checks': [], 'status': 'failed'}
+             report['sources'][name] = result
+@@ -73,7 +75,7 @@ async def verify(output: Path):
+ 
+ def main():
+     parser = argparse.ArgumentParser()
+-    parser.add_argument('--output', type=Path, default=Path('public-051-verification'))
++    parser.add_argument('--output', type=Path, default=Path('public-052-verification'))
+     args = parser.parse_args()
+     result = asyncio.run(verify(args.output))
+     return 0 if result['status'] == 'passed' else 1
+diff --git a/livros_baltigo/views.py b/livros_baltigo/views.py
+index ebc7830..9264a04 100644
+--- a/livros_baltigo/views.py
++++ b/livros_baltigo/views.py
+@@ -241,5 +241,6 @@ def sources_text(states, preferences):
+                   'O PDF não reproduz a edição impressa. A busca por clássicos é o foco desse catálogo.',
+                   '<b>Internet Archive</b>: arquivos públicos marcados como domínio público, sem empréstimos.',
+                   '<b>USP</b>: livros acadêmicos com licença aberta verificada na ficha.',
+-                  '<b>UFPB</b>: PDFs gratuitos disponibilizados pela editora; os direitos autorais são preservados.'])
++                  '<b>UFPB</b>: PDFs gratuitos disponibilizados pela editora; os direitos autorais são preservados.',
++                  '<b>InfoLivros</b>: índice de livros completos em português, com PDFs anunciados pela própria fonte.'])
+     return '\n'.join(lines)
+diff --git a/tests/test_infolivros.py b/tests/test_infolivros.py
+new file mode 100644
+index 0000000..c594691
+--- /dev/null
++++ b/tests/test_infolivros.py
+@@ -0,0 +1,77 @@
++import json
++from dataclasses import replace
++from unittest.mock import AsyncMock
++import pytest
++from livros_baltigo.infolivros import InfoLivros, BASE
++from livros_baltigo.models import SearchSpec
++from livros_baltigo.errors import UserError
++
++INDEX = b'''<html><ul><li><a class="az-book-link" href="/livro/orgulho-e-preconceito-jane-austen/">
++<span class="az-book-title">Orgulho e Preconceito</span><span class="az-book-author">Jane Austen</span></a></li>
++<li><a class="az-book-link" href="/livro/persuasao-jane-austen/">
++<span class="az-book-title">Persuasao</span><span class="az-book-author">Jane Austen</span></a></li></ul></html>'''
++
++
++def raw_record(book, price='0', url=None):
++    data = {'@type':'Book','name':book.title,'author':{'name':book.author},'url':book.source_url,
++            'inLanguage':'pt','offers':{'price':price},'description':'Descrição da fonte.','datePublished':'1813'}
++    href = url or 'https://pdf.infolivros.org/PT/aldus/orgulho-e-preconceito-jane-austen.pdf'
++    return ('<script type="application/ld+json">' + json.dumps(data) + '</script>'
++            + '<a class="pdf-download" href="' + href + '">Baixar PDF</a>').encode()
++
++
++async def test_local_index_search_by_title_author_accents_and_empty(settings):
++    source = InfoLivros(settings, None, None)
++    source._get = AsyncMock(return_value=(INDEX,'text/html'))
++    title = await source.search(SearchSpec('Orgulho e Preconceito'),1,8)
++    assert len(title.books)==1 and title.books[0].title=='Orgulho e Preconceito'
++    first = await source.search(SearchSpec('Jane Austen'),1,1)
++    second = await source.search(SearchSpec('Jane Austen'),2,1)
++    assert first.has_next and not second.has_next
++    assert first.books[0].key != second.books[0].key
++    assert not (await source.search(SearchSpec('zzqvnonexistentbookzz'))).books
++    assert (await source.search(SearchSpec('persuasão'))).books
++    assert source._get.await_count==1
++
++
++@pytest.mark.parametrize('extension,language',[('epub','portuguese'),('pdf','english')])
++async def test_unavailable_formats_not_fabricated(settings, extension, language):
++    source=InfoLivros(settings,None,None)
++    source._get=AsyncMock()
++    assert not (await source.search(SearchSpec('Austen',language,extension))).books
++    source._get.assert_not_awaited()
++
++
++def test_book_metadata_preserved_and_public_file_selected(settings):
++    source=InfoLivros(settings,None,None)
++    book=source.parse_index(INDEX)[0]
++    fresh,url=source.parse_record(raw_record(book),book)
++    assert fresh.title==book.title and fresh.author==book.author
++    assert fresh.year=='1813' and fresh.description=='Descrição da fonte.'
++    assert url.startswith('https://pdf.infolivros.org/PT/')
++
++
++@pytest.mark.parametrize('price',['10',None,'NaN','-1'])
++def test_no_paid_or_unknown_offer_treated_as_free(settings,price):
++    source=InfoLivros(settings,None,None);book=source.parse_index(INDEX)[0]
++    with pytest.raises(UserError):source.parse_record(raw_record(book,price=price),book)
++
++
++@pytest.mark.parametrize('url',['https://evil.example/test.pdf','http://pdf.infolivros.org/PT/a.pdf',
++    'https://127.0.0.1/PT/a.pdf','https://pdf.infolivros.org/PT/../private.pdf',
++    'https://pdf.infolivros.org/PT/a.pdf?token=anything'])
++def test_foreign_and_unsafe_downloads_rejected(settings,url):
++    source=InfoLivros(settings,None,None);book=source.parse_index(INDEX)[0]
++    with pytest.raises(UserError):source.parse_record(raw_record(book,url=url),book)
++
++
++async def test_record_cache_does_not_mix_books(settings):
++    source=InfoLivros(settings,None,None);book=source.parse_index(INDEX)[0]
++    source._get=AsyncMock(return_value=(raw_record(book),'text/html'))
++    await source.details(book); await source.file_info(book)
++    assert source._get.await_count==1
++    with pytest.raises(UserError):await source.details(replace(book,source_url='https://evil.example'))
++
++
++def test_unknown_index_not_silently_empty(settings):
++    with pytest.raises(UserError):InfoLivros(settings,None,None).parse_index(b'<h1>Layout changed</h1>')
+diff --git a/tests/test_interface_cooldown.py b/tests/test_interface_cooldown.py
+new file mode 100644
+index 0000000..0394008
+--- /dev/null
++++ b/tests/test_interface_cooldown.py
+@@ -0,0 +1,26 @@
++from unittest.mock import AsyncMock
++import pytest
++from livros_baltigo.errors import TelegramError
++from livros_baltigo.interface import sync_interface
++
++
++async def test_optional_metadata_honors_telegram_rate_limit(settings):
++    tg = AsyncMock()
++    tg.call.side_effect = TelegramError(429, 'Too many requests', 120)
++    await sync_interface(tg, settings, [], 999)
++    assert tg.call.await_count == 1
++    await sync_interface(tg, settings, [], 999)
++    assert tg.call.await_count == 1
++    await sync_interface(tg, settings, [{'command':'changed'}], 999)
++    assert tg.call.await_count == 1
++
++
++async def test_successful_metadata_cached_across_restarts(settings):
++    tg = AsyncMock()
++    await sync_interface(tg, settings, [], 999)
++    calls = tg.call.await_count
++    assert calls > 0
++    await sync_interface(tg, settings, [], 999)
++    assert tg.call.await_count == calls
++    await sync_interface(tg, settings, [{'command': 'new', 'description': 'New command'}], 999)
++    assert tg.call.await_count > calls
