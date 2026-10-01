@@ -1,0 +1,65 @@
+name: Validate book sources 0.5.2
+on:
+  push:
+    branches: ['feat/list-sources-052-20261001']
+    paths:
+      - 'maintenance/release052-*.patch'
+      - '.github/workflows/release052.yml'
+permissions:
+  contents: write
+concurrency:
+  group: release052-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/list-sources-052-20261001
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Apply reviewed changes
+        run: |
+          cat maintenance/release052-*.patch > /tmp/release052.patch
+          git apply --check /tmp/release052.patch
+          git apply /tmp/release052.patch
+      - name: Install, compile and run isolated regression tests
+        run: |
+          python -m pip install -r requirements-dev.txt
+          python -m compileall -q livros_baltigo
+          python -m pytest -ra --junitxml=test-results-052.xml
+      - name: Validate positive and empty searches plus a real PDF from every public source
+        run: python -m livros_baltigo.multisource_check --output public-052-verification
+      - name: Commit verified code and results on the review branch only
+        run: |
+          python - <<'PY'
+          import json,pathlib,datetime,xml.etree.ElementTree as ET
+          p=pathlib.Path('public-052-verification/report.json');report=json.loads(p.read_text())
+          suite=ET.parse('test-results-052.xml').getroot().find('testsuite')
+          report['automated_tests']={k:int(suite.get(k,'0')) for k in ['tests','errors','failures','skipped']}
+          report['verified_at_utc']=datetime.datetime.now(datetime.timezone.utc).isoformat()
+          assert report['status']=='passed' and len(report['sources'])==5
+          assert report['automated_tests']['tests']>=303 and not report['automated_tests']['failures'] and not report['automated_tests']['errors']
+          pathlib.Path('docs/PUBLIC_VERIFICATION_0.5.2.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
+          p.write_text(json.dumps(report,ensure_ascii=False,indent=2))
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add livros_baltigo tests docs README.md
+          git commit -m 'feat: verified InfoLivros source, resilient source selection and Telegram metadata cooldown'
+          git push origin HEAD:feat/list-sources-052-20261001
+      - name: Preserve source for verification
+        if: always()
+        run: tar -czf release052-tested-source.tar.gz livros_baltigo tests docs requirements.txt requirements-dev.txt README.md
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release052-verification
+          path: |
+            public-052-verification/
+            test-results-052.xml
+            release052-tested-source.tar.gz
+          retention-days: 7
