@@ -1,0 +1,376 @@
+diff --git a/livros_baltigo/catalogs.py b/livros_baltigo/catalogs.py
+index 2e9fd16..250c39e 100644
+--- a/livros_baltigo/catalogs.py
++++ b/livros_baltigo/catalogs.py
+@@ -1,7 +1,8 @@
+-"""Explicit catalog routing. A failed provider never masquerades as an empty search."""
++"""Independent catalog routing: bounded fallback, isolated failures, stable pagination."""
+ from __future__ import annotations
+ 
+ import asyncio
++import logging
+ import time
+ from dataclasses import replace
+ from urllib.parse import urlsplit
+@@ -10,24 +11,34 @@ from .catalog import SOURCES
+ from .errors import UserError
+ from .models import SearchSpec
+ 
++log = logging.getLogger(__name__)
++
+ 
+ class CatalogRouter:
+-    def __init__(self, settings, legacy, gutenberg):
++    def __init__(self, settings, legacy, gutenberg, extra=None):
+         self.settings = settings
+         self.providers = {'zlibrary': legacy, 'gutenberg': gutenberg}
+-        self.states = {
+-            'zlibrary': {'status': 'not_verified' if settings.source_configured else 'not_configured'},
+-            'gutenberg': {'status': 'not_verified' if settings.public_catalog else 'disabled'},
+-        }
++        for key, provider in (extra or {}).items():
++            if key not in SOURCES or key in {'auto', 'zlibrary', 'gutenberg'}:
++                raise ValueError('Unknown extra catalog')
++            self.providers[key] = provider
++        self.enabled = set(extra or {})
++        if settings.source_configured:
++            self.enabled.add('zlibrary')
++        if settings.public_catalog:
++            self.enabled.add('gutenberg')
++        self.states = {name: {'status': 'not_verified' if name in self.enabled else
++                       'not_configured' if name == 'zlibrary' else 'disabled'}
++                       for name in SOURCES if name != 'auto'}
+         self.legacy_retry_at = 0.0
+ 
+     @property
+     def available(self):
+-        return self.settings.source_configured or self.settings.public_catalog
++        return bool(self.enabled)
+ 
+     @property
+     def state(self):
+-        states = [v['status'] for v in self.states.values() if v['status'] not in {'disabled', 'not_configured'}]
++        states = [self.states[name]['status'] for name in self.enabled]
+         if states and all(s == 'ready' for s in states):
+             return 'ready'
+         if 'ready' in states:
+@@ -37,10 +48,9 @@ class CatalogRouter:
+         return 'unavailable'
+ 
+     def provider(self, source):
+-        if source not in self.providers:
++        if source not in SOURCES or source == 'auto':
+             raise UserError('Fonte desconhecida. Escolha uma opção em /fontes.', 'invalid_source')
+-        enabled = self.settings.source_configured if source == 'zlibrary' else self.settings.public_catalog
+-        if not enabled:
++        if source not in self.enabled or source not in self.providers:
+             raise UserError(f'{SOURCES[source]} não está configurado ou está desativado. Escolha outra fonte em /fontes.', 'source_disabled')
+         return self.providers[source]
+ 
+@@ -54,9 +64,8 @@ class CatalogRouter:
+ 
+     async def _search_one(self, source, spec, page, limit):
+         provider = self.provider(source)
+-        # Explicit selection does not bypass a provider's own rate-limit or access-denial cooldown.
+         try:
+-            async with asyncio.timeout(10 if source == 'zlibrary' else 60):
++            async with asyncio.timeout(10 if source == 'zlibrary' else 28):
+                 result = await provider.search(replace(spec, source=source), page, limit)
+             self.states[source] = {'status': 'ready', 'result_count': len(result.books)}
+             return replace(result, source=source)
+@@ -65,37 +74,47 @@ class CatalogRouter:
+             self._failed(source, error)
+             raise error from exc
+         except UserError as exc:
+-            self._failed(source, exc)
++            if exc.code not in {'invalid_filter', 'invalid_search', 'refine_search', 'expired_search', 'invalid_page'}:
++                self._failed(source, exc)
+             raise
++        except Exception as exc:
++            # One parser/network failure must not disable every independent catalog.
++            error = UserError(f'{SOURCES[source]} não pôde concluir a consulta. Tente outro catálogo.', 'provider_error')
++            log.warning('Falha isolada de catálogo: source=%s; type=%s', source, type(exc).__name__)
++            self._failed(source, error)
++            raise error from exc
+ 
+     async def search(self, spec, page=1, limit=8):
+         if spec.source not in SOURCES:
+             raise UserError('Fonte de busca inválida.', 'invalid_source')
+         if spec.source != 'auto':
+             return await self._search_one(spec.source, spec, page, limit)
+-        order = []
+-        if self.settings.source_configured and time.monotonic() >= self.legacy_retry_at:
+-            order.append('zlibrary')
+-        if self.settings.public_catalog:
+-            order.append('gutenberg')
+-        if not order:
++        first = [name for name in ('zlibrary', 'gutenberg', 'archive') if name in self.enabled]
++        if time.monotonic() < self.legacy_retry_at and 'zlibrary' in first:
++            first.remove('zlibrary')
++        second = [name for name in ('usp', 'ufpb') if name in self.enabled]
++        if not first and not second:
+             raise UserError('Nenhuma fonte está disponível agora. Consulte /fontes.', 'catalog_unavailable')
+         failures, empty = [], None
+-        for source in order:
+-            try:
+-                result = await self._search_one(source, spec, page, limit)
++        for batch in (first, second):
++            responses = await asyncio.gather(*(self._search_one(name, spec, page, limit) for name in batch), return_exceptions=True)
++            for source, result in zip(batch, responses):
++                if isinstance(result, BaseException):
++                    if isinstance(result, asyncio.CancelledError):
++                        raise result
++                    message = result.message if isinstance(result, UserError) else 'Falha de consulta.'
++                    failures.append(f'{SOURCES[source]}: {message}')
++                    continue
+                 if result.books:
+-                    notice = ''
+-                    if source == 'gutenberg' and self.settings.source_configured:
+-                        notice = ('Resultados do acervo independente do Project Gutenberg. '
+-                                  'Esta lista não confirma o funcionamento do Z-Library.')
++                    notice = result.notice
++                    if source != 'zlibrary' and self.settings.source_configured:
++                        notice = (notice + ' ' if notice else '') + 'Acervo independente; estes resultados não confirmam o funcionamento do Z-Library.'
+                     return replace(result, notice=notice)
+                 empty = result
+-            except UserError as exc:
+-                failures.append(f'{SOURCES[source]}: {exc.message}')
+         if empty is not None:
+-            notice = ('Uma fonte respondeu sem resultados. Outras fontes não puderam ser consultadas. '
+-                      'Isso não significa que o livro não exista.' if failures or self.legacy_retry_at > time.monotonic() else '')
++            notice = 'Nenhuma edição encontrada nas fontes que responderam.'
++            if failures or self.legacy_retry_at > time.monotonic():
++                notice += ' Há fontes indisponíveis; isso não confirma ausência nos outros acervos.'
+             return replace(empty, notice=notice)
+         raise UserError('Não consegui consultar as fontes.\n\n' + '\n'.join(failures), 'catalog_unavailable')
+ 
+@@ -103,28 +122,40 @@ class CatalogRouter:
+         return await self.for_book(book).details(book)
+ 
+     async def cover(self, url):
+-        source = 'gutenberg' if urlsplit(url).hostname in {'www.gutenberg.org', 'gutenberg.org'} else 'zlibrary'
+-        return await self.provider(source).cover(url)
++        host = urlsplit(url).hostname or ''
++        if host in {'www.gutenberg.org', 'gutenberg.org'}:
++            return await self.provider('gutenberg').cover(url)
++        for name in ('archive', 'usp', 'ufpb'):
++            if name not in self.enabled:
++                continue
++            provider = self.providers[name]
++            try:
++                provider.allowed_url(url)
++            except UserError:
++                continue
++            return await provider.cover(url)
++        if 'zlibrary' in self.enabled:
++            return await self.provider('zlibrary').cover(url)
++        return None
+ 
+     async def quota(self):
+         try:
+             async with asyncio.timeout(10):
+                 return await self.provider('zlibrary').quota()
+         except TimeoutError as exc:
+-            raise UserError('A consulta ao saldo do Z-Library expirou. A fonte pública não depende desse saldo.', 'source_timeout') from exc
++            raise UserError('A consulta ao saldo do Z-Library expirou. As fontes públicas não dependem desse saldo.', 'source_timeout') from exc
+ 
+     async def probe(self):
+         async def check(source):
+-            if self.states[source]['status'] in {'disabled', 'not_configured'}:
++            if source not in self.enabled:
+                 return
++            provider = self.providers[source]
++            query = getattr(provider, 'probe_query', 'Dom Casmurro')
++            if not isinstance(query, str):
++                query = 'Dom Casmurro'
+             try:
+-                # Lookup only. Neither an account download nor a Telegram message is sent.
+-                result = await self._search_one(source, SearchSpec('Dom Casmurro', 'portuguese', 'pdf', source), 1, 1)
+-                if not result.books:
+-                    self.states[source] = {'status': 'empty_probe', 'result_count': 0}
++                await self._search_one(source, SearchSpec(query, 'portuguese', 'pdf', source), 1, 1)
+             except UserError:
+                 pass
+-            except Exception as exc:
+-                self.states[source] = {'status': 'unavailable', 'error': type(exc).__name__}
+         await asyncio.gather(*(check(source) for source in self.providers))
+         return {'status': self.state, 'sources': {k: dict(v) for k, v in self.states.items()}, 'download_tested': False}
+diff --git a/livros_baltigo/config.py b/livros_baltigo/config.py
+index 128d860..9817c6d 100644
+--- a/livros_baltigo/config.py
++++ b/livros_baltigo/config.py
+@@ -43,6 +43,7 @@ class Settings:
+     session_ttl: int = 3600
+     setup_mode: bool = False
+     public_catalog: bool = True
++    extra_catalogs: frozenset[str] = frozenset()
+ 
+     @property
+     def source_configured(self) -> bool:
+@@ -56,8 +57,10 @@ class Settings:
+             raise ValueError("Preencha BOT_TOKEN com o token de um bot novo do BotFather.")
+         if not self.admin_ids:
+             raise ValueError("Preencha ADMIN_IDS. O bot não inicia sem administrador.")
++        if not self.extra_catalogs <= {"archive", "usp", "ufpb"}:
++            raise ValueError("PUBLIC_BOOK_SOURCES aceita archive, usp e ufpb.")
+         source_values = (self.base_url, self.user_id, self.user_key, self.email, self.password)
+-        if not ((self.setup_mode or self.public_catalog) and not any(source_values)):
++        if not ((self.setup_mode or self.public_catalog or self.extra_catalogs) and not any(source_values)):
+             parts = urlsplit(self.base_url)
+             if (parts.scheme != "https" or not parts.hostname or parts.username or parts.password
+                     or parts.path not in {"", "/"} or parts.query or parts.fragment
+@@ -101,6 +104,7 @@ class Settings:
+         try:
+             value = cls(
+                 public_catalog=public_catalog == "true",
++                extra_catalogs=frozenset(x.strip() for x in get("PUBLIC_BOOK_SOURCES", "archive,usp,ufpb").split(",") if x.strip()),
+                 setup_mode=setup == "true",
+                 bot_token=get("BOT_TOKEN"), admin_ids=ids(get("ADMIN_IDS")),
+                 base_url=get("ZLIB_BASE_URL").rstrip("/"),
+diff --git a/livros_baltigo/gutenberg.py b/livros_baltigo/gutenberg.py
+index 7140f01..243cc58 100644
+--- a/livros_baltigo/gutenberg.py
++++ b/livros_baltigo/gutenberg.py
+@@ -63,7 +63,15 @@ def parse_feed(raw: bytes, spec: SearchSpec) -> tuple[list[Book], str]:
+     feed = xml(raw, '{'+NS['a']+'}feed')
+     books, seen = [], set()
+     for entry in feed.findall('a:entry',NS)[:100]:
+-        ident = entry.findtext('a:id','',NS)
++        ident = entry.findtext('a:id','',NS).strip()
++        # The live OPDS feed encodes an empty search as a navigation entry.
++        # It is not an ebook; do not reject the entire source as malformed.
++        empty_title = plain(entry.findtext('a:title','',NS), 100).casefold()
++        if (empty_title == 'no records found.'
++                and ident in {BASE+'/ebooks.opds/', 'http://www.gutenberg.org/ebooks.opds/'}
++                and any(link.get('rel') == 'subsection' and link.get('href') == '/ebooks.opds/'
++                        for link in entry.findall('a:link', NS))):
++            continue
+         match = re.fullmatch(r'https?://(?:www\.)?gutenberg\.org/ebooks/(\d{1,9})(?:\.opds)?',ident)
+         if not match:
+             raise UserError('Identificador inválido na busca Gutenberg.', 'schema')
+@@ -73,7 +81,10 @@ def parse_feed(raw: bytes, spec: SearchSpec) -> tuple[list[Book], str]:
+         title = plain(entry.findtext('a:title','',NS),500)
+         suffix = re.search(r'\s*\(([^()]+)\)\s*$',title)
+         language = suffix.group(1).casefold() if suffix else 'english'
+-        if suffix:title=title[:suffix.start()]
++        if suffix and language in LANGS:
++            title=title[:suffix.start()]
++        elif suffix:
++            language='english'
+         if spec.language != 'any' and language != spec.language:continue
+         author=plain(entry.findtext('a:content','',NS),500) or 'Autor não informado'
+         for extension in (['pdf','epub'] if spec.extension=='any' else [spec.extension]):
+diff --git a/livros_baltigo/jobs.py b/livros_baltigo/jobs.py
+index 8121317..2c507ac 100644
+--- a/livros_baltigo/jobs.py
++++ b/livros_baltigo/jobs.py
+@@ -122,6 +122,7 @@ class Downloads:
+                 result = await self.tg.document(job.chat, path, filename_for(job.book, extension),
+                                        f"📖 <b>{esc(job.book.title, 160)}</b>\n{esc(job.book.author, 100)}\n\n{extension.upper()} · {esc(views.language_name(job.book.language), 50)}\nFonte: {esc(SOURCES.get(job.book.source, job.book.source), 60)}"
+                                        + ("\nPDF diagramado a partir do texto integral; não é fac-símile." if job.book.source == "gutenberg" and extension == "pdf" else "")
++                                       + ("\nOrigem: " + esc(job.book.source_url, 300) if job.book.source_url else "")
+                                        + f"\n🔖 {esc(self.settings.brand, 80)} · Boa leitura!")
+                 receipt = document_receipt(result, job.chat)
+                 delivered = True
+diff --git a/livros_baltigo/models.py b/livros_baltigo/models.py
+index 8c86ece..27c292c 100644
+--- a/livros_baltigo/models.py
++++ b/livros_baltigo/models.py
+@@ -134,7 +134,7 @@ class SearchSpec:
+     source: str = "auto"
+ 
+     def cache_key(self, page: int, limit: int) -> str:
+-        text = f"v2|{self.source}|{self.query.casefold()}|{self.language}|{self.extension}|{page}|{limit}"
++        text = f"v3|{self.source}|{self.query.casefold()}|{self.language}|{self.extension}|{page}|{limit}"
+         return hashlib.sha256(text.encode()).hexdigest()
+ 
+ 
+diff --git a/livros_baltigo/multisource_check.py b/livros_baltigo/multisource_check.py
+new file mode 100644
+index 0000000..76b89a3
+--- /dev/null
++++ b/livros_baltigo/multisource_check.py
+@@ -0,0 +1,83 @@
++"""Reproducible public-source verification. Never imports/uses Telegram credentials."""
++from __future__ import annotations
++
++import argparse
++import asyncio
++import hashlib
++import json
++from pathlib import Path
++
++from .archive import InternetArchive
++from .config import Settings
++from .errors import UserError
++from .gutenberg import Gutenberg
++from .models import SearchSpec
++from .network import new_session
++from .omp import UniversityBooks
++
++
++async def verify(output: Path):
++    output.mkdir(parents=True, exist_ok=True)
++    settings = Settings(bot_token='', admin_ids=frozenset(), base_url='', data_dir=output)
++    report = {'version': '0.5.1', 'telegram_delivery_tested': False,
++              'account_credentials_used': False, 'sources': {}, 'status': 'failed'}
++    async with new_session() as session, new_session() as files:
++        sources = {'gutenberg': Gutenberg(settings, session, files),
++                   'archive': InternetArchive(settings, session, files),
++                   'usp': UniversityBooks(settings, session, files, 'usp'),
++                   'ufpb': UniversityBooks(settings, session, files, 'ufpb')}
++        for name, provider in sources.items():
++            result = {'checks': [], 'status': 'failed'}
++            report['sources'][name] = result
++            try:
++                query = getattr(provider, 'probe_query', 'Dom Casmurro')
++                page = await provider.search(SearchSpec(query, 'portuguese', 'pdf', name), 1, 2)
++                assert page.books, 'positive_search_returned_no_books'
++                result['checks'].append({'search': query, 'results': len(page.books), 'has_next': page.has_next})
++                empty = await provider.search(SearchSpec('zzqvnonexistentbookzz', 'portuguese', 'pdf', name), 1, 1)
++                assert not empty.books and not empty.has_next, 'empty_search_failed'
++                result['checks'].append({'empty_search': 'passed'})
++                async def progress(current, total):
++                    pass
++                downloaded = False
++                for book in page.books:
++                    try:
++                        fresh = await provider.details(book)
++                        url, extension = await provider.file_info(fresh)
++                        path = output / (name + '.' + extension)
++                        count = await provider.download(url, extension, path, progress)
++                        assert count > 1000 and path.read_bytes().startswith(b'%PDF-'), 'invalid_pdf'
++                        result['checks'].append({'download': 'passed', 'format': extension,
++                            'title': fresh.title, 'source_url': fresh.source_url, 'bytes': count,
++                            'sha256': hashlib.sha256(path.read_bytes()).hexdigest()})
++                        downloaded = True
++                        break
++                    except UserError as exc:
++                        if exc.code not in {'file_too_large', 'file_missing'}:
++                            raise
++                        result['checks'].append({'unavailable_edition': book.id, 'reason': exc.code})
++                assert downloaded, 'no_pdf_download_validated'
++                result['status'] = 'passed'
++            except Exception as exc:
++                result['error'] = exc.code if isinstance(exc, UserError) else type(exc).__name__
++                # Error descriptions may contain user data in other components;
++                # this check only uses public constant search terms and no accounts.
++                print(json.dumps({'source': name, 'status': 'failed', 'error': result['error']}), flush=True)
++            finally:
++                (output / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
++            print(json.dumps({'source': name, **result}, ensure_ascii=False), flush=True)
++    report['status'] = 'passed' if all(item['status'] == 'passed' for item in report['sources'].values()) else 'failed'
++    (output / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
++    return report
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument('--output', type=Path, default=Path('public-051-verification'))
++    args = parser.parse_args()
++    result = asyncio.run(verify(args.output))
++    return 0 if result['status'] == 'passed' else 1
++
++
++if __name__ == '__main__':
++    raise SystemExit(main())
