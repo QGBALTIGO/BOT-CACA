@@ -63,7 +63,15 @@ def parse_feed(raw: bytes, spec: SearchSpec) -> tuple[list[Book], str]:
     feed = xml(raw, '{'+NS['a']+'}feed')
     books, seen = [], set()
     for entry in feed.findall('a:entry',NS)[:100]:
-        ident = entry.findtext('a:id','',NS)
+        ident = entry.findtext('a:id','',NS).strip()
+        # The live OPDS feed encodes an empty search as a navigation entry.
+        # It is not an ebook; do not reject the entire source as malformed.
+        empty_title = plain(entry.findtext('a:title','',NS), 100).casefold()
+        if (empty_title == 'no records found.'
+                and ident in {BASE+'/ebooks.opds/', 'http://www.gutenberg.org/ebooks.opds/'}
+                and any(link.get('rel') == 'subsection' and link.get('href') == '/ebooks.opds/'
+                        for link in entry.findall('a:link', NS))):
+            continue
         match = re.fullmatch(r'https?://(?:www\.)?gutenberg\.org/ebooks/(\d{1,9})(?:\.opds)?',ident)
         if not match:
             raise UserError('Identificador inválido na busca Gutenberg.', 'schema')
@@ -73,7 +81,10 @@ def parse_feed(raw: bytes, spec: SearchSpec) -> tuple[list[Book], str]:
         title = plain(entry.findtext('a:title','',NS),500)
         suffix = re.search(r'\s*\(([^()]+)\)\s*$',title)
         language = suffix.group(1).casefold() if suffix else 'english'
-        if suffix:title=title[:suffix.start()]
+        if suffix and language in LANGS:
+            title=title[:suffix.start()]
+        elif suffix:
+            language='english'
         if spec.language != 'any' and language != spec.language:continue
         author=plain(entry.findtext('a:content','',NS),500) or 'Autor não informado'
         for extension in (['pdf','epub'] if spec.extension=='any' else [spec.extension]):

@@ -13,7 +13,9 @@ LANGUAGES = {
     "japanese": "Japonês", "chinese": "Chinês", "russian": "Russo",
     "any": "Todos os idiomas",
 }
-SOURCES = {"auto": "Automático", "gutenberg": "Project Gutenberg", "zlibrary": "Z-Library"}
+SOURCES = {"auto": "Automático", "gutenberg": "Project Gutenberg",
+           "archive": "Internet Archive", "usp": "Livros Abertos USP",
+           "ufpb": "Editora UFPB", "zlibrary": "Z-Library"}
 FORMATS = {"any": "EPUB e PDF", "epub": "EPUB", "pdf": "PDF"}
 
 

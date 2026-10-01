@@ -122,6 +122,7 @@ class Downloads:
                 result = await self.tg.document(job.chat, path, filename_for(job.book, extension),
                                        f"📖 <b>{esc(job.book.title, 160)}</b>\n{esc(job.book.author, 100)}\n\n{extension.upper()} · {esc(views.language_name(job.book.language), 50)}\nFonte: {esc(SOURCES.get(job.book.source, job.book.source), 60)}"
                                        + ("\nPDF diagramado a partir do texto integral; não é fac-símile." if job.book.source == "gutenberg" and extension == "pdf" else "")
+                                       + ("\nOrigem: " + esc(job.book.source_url, 300) if job.book.source_url else "")
                                        + f"\n🔖 {esc(self.settings.brand, 80)} · Boa leitura!")
                 receipt = document_receipt(result, job.chat)
                 delivered = True

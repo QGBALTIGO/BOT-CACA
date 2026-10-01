@@ -161,7 +161,7 @@ def group_results(page: SearchPage, query: str, ident: str, groups: list[BookGro
         lines.extend([esc(page.notice, 350), ''])
     rows = []
     if not groups:
-        lines += ["<b>Ainda não encontrei essa leitura.</b>",
+        lines += ["<b>Nenhuma edição encontrada nesta consulta.</b>",
                   "Tente o título original, o nome do autor ou amplie o idioma."]
         rows.append([button("🌐 Tentar em todos os idiomas", f"searchall:{ident}")])
     for n, (group, target) in enumerate(zip(groups, targets), 1):
@@ -179,6 +179,7 @@ def group_results(page: SearchPage, query: str, ident: str, groups: list[BookGro
         navigation.append(button("Próxima →", f"page:{ident}:{page.page + 1}"))
     if navigation:
         rows.append(navigation)
+    rows.append([button("📂 Buscar em outra fonte", f"searchsources:{ident}")])
     rows.append([button("🌐 Filtros", "menu:settings"), button("🔎 Nova busca", "menu:search")])
     rows.append([button("📚 Início", "menu:home")])
     return "\n".join(lines), rows
@@ -227,7 +228,9 @@ def sources_text(states, preferences):
               'disabled': 'Desativado', 'empty_probe': 'Teste respondeu sem encontrar a obra'}
     lines = ['📂 <b>Seus catálogos de leitura</b>', '',
              'Selecionado: <b>' + SOURCES.get(preferences.get('source', 'auto'), 'Automático') + '</b>', '']
-    for name in ('gutenberg', 'zlibrary'):
+    for name in SOURCES:
+        if name == 'auto':
+            continue
         item = states.get(name, {'status': 'not_verified'})
         lines.append('<b>' + SOURCES[name] + '</b> · ' + labels.get(item['status'], 'Ainda não verificado'))
         if item.get('error') == 'source_protected':
@@ -235,5 +238,8 @@ def sources_text(states, preferences):
     lines.extend(['', 'Os catálogos são independentes e não contêm necessariamente os mesmos títulos.',
                   'No modo Automático, a fonte usada aparece nos resultados e fica fixa durante a paginação.', '',
                   '<b>Project Gutenberg</b> oferece EPUB da fonte e PDF diagramado do texto integral, com créditos e licença. '
-                  'O PDF não reproduz a edição impressa. A busca por clássicos é o foco desse catálogo.'])
+                  'O PDF não reproduz a edição impressa. A busca por clássicos é o foco desse catálogo.',
+                  '<b>Internet Archive</b>: arquivos públicos marcados como domínio público, sem empréstimos.',
+                  '<b>USP</b>: livros acadêmicos com licença aberta verificada na ficha.',
+                  '<b>UFPB</b>: PDFs gratuitos disponibilizados pela editora; os direitos autorais são preservados.'])
     return '\n'.join(lines)

@@ -134,7 +134,7 @@ class SearchSpec:
     source: str = "auto"
 
     def cache_key(self, page: int, limit: int) -> str:
-        text = f"v2|{self.source}|{self.query.casefold()}|{self.language}|{self.extension}|{page}|{limit}"
+        text = f"v3|{self.source}|{self.query.casefold()}|{self.language}|{self.extension}|{page}|{limit}"
         return hashlib.sha256(text.encode()).hexdigest()
 
 

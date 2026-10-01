@@ -120,7 +120,9 @@ class HTMLSource(ZLibrary):
         self.html_pages = {}
 
     async def get_html(self, path: str) -> str:
-        await self.ensure_login()
+        # Catalogue HTML is read independently of the account/EAPI login.
+        # Public search never sends account credentials; file requests still
+        # use the authenticated provider and its actual quota.
         current = same_origin(self.base, path)
         async with self.html_lock:
             self.check_pause()
@@ -128,7 +130,7 @@ class HTMLSource(ZLibrary):
             self.last_html = time.monotonic()
             try:
                 for _ in range(4):
-                    async with self.api.get(current, headers={**self._headers(), 'Accept': 'text/html'}, allow_redirects=False) as response:
+                    async with self.api.get(current, headers={'Accept': 'text/html'}, allow_redirects=False) as response:
                         code = response.status
                         if code in {301, 302, 303, 307, 308}:
                             location = response.headers.get('Location', '')
@@ -136,9 +138,9 @@ class HTMLSource(ZLibrary):
                                 raise UserError('Redirecionamento sem destino.', 'html_redirect')
                             current = same_origin(self.base, urljoin(current, location))
                             continue
-                        if code in {401, 403, 429}:
-                            error = {401: 'html_auth', 403: 'blocked', 429: 'rate_limit'}[code]
-                            self.pause(error, retry_after_seconds(response.headers.get('Retry-After')) if code == 429 else 60)
+                        if code in {401, 403, 429, 513}:
+                            error = {401: 'html_auth', 403: 'blocked', 429: 'rate_limit', 513: 'source_protected'}[code]
+                            self.pause(error, retry_after_seconds(response.headers.get('Retry-After')) if code == 429 else 300 if code == 513 else 60)
                             self.check_pause()
                         if code != 200:
                             raise UserError('A página solicitada não está disponível.', 'not_found' if code == 404 else 'unavailable')

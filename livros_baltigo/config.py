@@ -43,6 +43,7 @@ class Settings:
     session_ttl: int = 3600
     setup_mode: bool = False
     public_catalog: bool = True
+    extra_catalogs: frozenset[str] = frozenset()
 
     @property
     def source_configured(self) -> bool:
@@ -56,8 +57,10 @@ class Settings:
             raise ValueError("Preencha BOT_TOKEN com o token de um bot novo do BotFather.")
         if not self.admin_ids:
             raise ValueError("Preencha ADMIN_IDS. O bot não inicia sem administrador.")
+        if not self.extra_catalogs <= {"archive", "usp", "ufpb"}:
+            raise ValueError("PUBLIC_BOOK_SOURCES aceita archive, usp e ufpb.")
         source_values = (self.base_url, self.user_id, self.user_key, self.email, self.password)
-        if not ((self.setup_mode or self.public_catalog) and not any(source_values)):
+        if not ((self.setup_mode or self.public_catalog or self.extra_catalogs) and not any(source_values)):
             parts = urlsplit(self.base_url)
             if (parts.scheme != "https" or not parts.hostname or parts.username or parts.password
                     or parts.path not in {"", "/"} or parts.query or parts.fragment
@@ -101,6 +104,7 @@ class Settings:
         try:
             value = cls(
                 public_catalog=public_catalog == "true",
+                extra_catalogs=frozenset(x.strip() for x in get("PUBLIC_BOOK_SOURCES", "archive,usp,ufpb").split(",") if x.strip()),
                 setup_mode=setup == "true",
                 bot_token=get("BOT_TOKEN"), admin_ids=ids(get("ADMIN_IDS")),
                 base_url=get("ZLIB_BASE_URL").rstrip("/"),

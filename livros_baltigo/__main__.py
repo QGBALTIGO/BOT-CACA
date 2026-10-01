@@ -19,6 +19,8 @@ from .provider import ZLibrary
 from .scraper import HTMLSource
 from .gutenberg import Gutenberg
 from .catalogs import CatalogRouter
+from .archive import InternetArchive
+from .omp import UniversityBooks
 from urllib.parse import urlsplit
 from .storage import Store
 from .telegram import Telegram
@@ -32,7 +34,10 @@ async def execute(settings: Settings, doctor=False):
         if mode not in {"html", "api"}:
             raise ValueError("BOOK_SOURCE_MODE deve ser html ou api")
         legacy = (HTMLSource if mode == "html" else ZLibrary)(settings, api, files)
-        source = CatalogRouter(settings, legacy, Gutenberg(settings, public_api, public_files))
+        extra = {name: (InternetArchive(settings, public_api, public_files) if name == "archive"
+                        else UniversityBooks(settings, public_api, public_files, name))
+                 for name in settings.extra_catalogs}
+        source = CatalogRouter(settings, legacy, Gutenberg(settings, public_api, public_files), extra)
         if doctor:
             me = await telegram.call("getMe")
             print(f"Telegram: conectado a @{me.get('username', '(sem username)')}")

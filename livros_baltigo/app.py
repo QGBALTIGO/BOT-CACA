@@ -130,7 +130,7 @@ class BotApp:
         if isinstance(self.source, CatalogRouter):
             text += "\n\n📂 Fonte: <b>" + esc(SOURCES.get(preferences.get('source', 'auto'), 'Automático')) + "</b>"
             if self.source.state == 'partial':
-                text += "\n<i>Uma fonte está indisponível. O outro catálogo funciona de forma independente; consulte Fontes.</i>"
+                text += "\n<i>Há fontes indisponíveis. Os demais catálogos funcionam de forma independente; consulte Fontes.</i>"
             elif not self.source.available or self.source.state == 'unavailable':
                 text += "\n⚠️ <i>Os catálogos estão indisponíveis. Seus favoritos continuam salvos.</i>"
         elif not self.settings.source_configured:
@@ -160,7 +160,7 @@ class BotApp:
             message = await self.tg.message(chat, "🔎 Buscando livros…")
         try:
             result = await self.search_page(spec, page)
-            if result.source in {'gutenberg', 'zlibrary'}:
+            if result.source in SOURCES and result.source != 'auto':
                 await self.store.pin_session_source(uid, ident, result.source)
             groups = group_books(result.books)
             targets = []
@@ -174,7 +174,8 @@ class BotApp:
                 f"{views.LANGUAGES[spec.language]} · {views.FORMATS[spec.extension]}")
             await self._send(chat, text, keyboard, message)
         except UserError as exc:
-            await self._send(chat, esc(self.friendly_error(uid, exc), 1000), views.home_keyboard(), message)
+            await self._send(chat, esc(self.friendly_error(uid, exc), 1000),
+                [[views.button("📂 Tentar outra fonte", f"searchsources:{ident}")]] + views.home_keyboard(), message)
 
     async def search_page(self, spec: SearchSpec, page: int):
         key = spec.cache_key(page, self.settings.page_size)
@@ -363,6 +364,27 @@ class BotApp:
             if not last:
                 raise UserError("Sua busca expirou. Envie novamente o nome do livro.", "expired_search")
             await self.new_search(uid, chat, last.query, edit=message)
+        elif re.fullmatch(r"searchsources:[a-f0-9]{12}", data):
+            ident = data.split(":")[1]
+            spec = await self.store.get_session(uid, ident)
+            if spec is None:
+                raise UserError("Esta busca expirou ou pertence a outra pessoa.", "expired_search")
+            enabled = self.source.enabled if isinstance(self.source, CatalogRouter) else {"zlibrary"}
+            rows = [[views.button(label, f"searchvia:{ident}:{name}")]
+                    for name, label in SOURCES.items() if name in enabled or name == "auto"]
+            rows.append([views.button("📚 Início", "menu:home")])
+            await self._send(chat, "📂 <b>Buscar o mesmo título em outra fonte</b>\n\n"
+                + esc(spec.query, 200) + "\n\nEscolha o catálogo. Seu título e seus filtros serão mantidos.", rows, message)
+        elif re.fullmatch(r"searchvia:[a-f0-9]{12}:[a-z]+", data):
+            _, old_ident, source = data.split(":")
+            spec = await self.store.get_session(uid, old_ident)
+            if spec is None:
+                raise UserError("Esta busca expirou ou pertence a outra pessoa.", "expired_search")
+            if source not in SOURCES:
+                raise UserError("Fonte inválida.", "invalid_source")
+            new_spec = SearchSpec(spec.query, spec.language, spec.extension, source)
+            ident = await self.store.session(uid, new_spec, self.settings.session_ttl)
+            await self.show_search(uid, chat, new_spec, ident, edit=message)
         elif re.fullmatch(r"searchall:[a-f0-9]{12}", data):
             spec = await self.store.get_session(uid, data.split(":")[1])
             if spec is None:
