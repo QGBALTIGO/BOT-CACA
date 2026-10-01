@@ -1,0 +1,55 @@
+name: Search regression probe
+on:
+  push:
+    branches: ['fix/scraping-051-20261001']
+    paths: ['.github/workflows/search-regression-probe.yml']
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Capture public responses without any account credentials
+        run: |
+          mkdir -p probe
+          python3 - <<'PY'
+          import json, pathlib, time, urllib.request, urllib.parse, urllib.error
+          from xml.etree import ElementTree as ET
+          out = pathlib.Path('probe')
+          queries = ['zzqvnonexistentbookzz', 'Harry Potter', 'Dom Casmurro', 'Machado', 'José de Alencar']
+          targets = [(f'pg-{i}.xml', 'https://www.gutenberg.org/ebooks/search.opds/?' + urllib.parse.urlencode({'query': q+' l.pt'})) for i,q in enumerate(queries)]
+          targets.append(('zlibrary-public.html', 'https://pt.1lib.sk/s/Dom%20Casmurro'))
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+          opener = urllib.request.build_opener(NoRedirect())
+          report = []
+          for name,url in targets:
+              item = {'file':name,'url':url}
+              request = urllib.request.Request(url, headers={'User-Agent':'LivrosBaltigo/0.5 (catalog diagnostic)'})
+              try:
+                  with opener.open(request, timeout=20) as response:
+                      raw = response.read(2000001)
+                      if len(raw)>2000000: raise ValueError('response_too_large')
+                      (out/name).write_bytes(raw)
+                      item.update(status=response.status, bytes=len(raw), content_type=response.headers.get('Content-Type'))
+                      if name.endswith('.xml'):
+                          root=ET.fromstring(raw)
+                          ns={'a':'http://www.w3.org/2005/Atom'}
+                          item['entries']=[{'id': e.findtext('a:id','',ns), 'title': e.findtext('a:title','',ns), 'links':[dict(l.attrib) for l in e.findall('a:link',ns) if not l.get('href','').startswith('data:')]} for e in root.findall('a:entry',ns)]
+              except urllib.error.HTTPError as exc:
+                  item.update(status=exc.code, error='http_error')
+                  # Access denials and redirects are recorded once, never retried.
+              except Exception as exc:
+                  item['error']=type(exc).__name__
+              report.append(item)
+              time.sleep(2.1)
+          (out/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
+          print(json.dumps(report,ensure_ascii=False,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: search-regression-responses
+          path: probe/
+          retention-days: 7
