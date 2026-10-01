@@ -1,0 +1,37 @@
+name: Livros - tests
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: livros-tests-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-dev.txt
+      - name: Compile application
+        run: python -m compileall -q livros_baltigo
+      - name: Unit and integration tests
+        run: python -m pytest -ra --junitxml=test-results.xml
+      - name: Preserve exact audited source
+        if: always()
+        run: git archive --format=tar.gz --output=audited-source.tar.gz HEAD
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: livros-audit-${{ github.sha }}
+          path: |
+            test-results.xml
+            audited-source.tar.gz
+          retention-days: 7
