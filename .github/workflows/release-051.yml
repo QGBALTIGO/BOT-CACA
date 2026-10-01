@@ -1,0 +1,94 @@
+name: Validate multiple book sources 0.5.1
+on:
+  push:
+    branches: ['fix/scraping-051-20261001']
+    paths:
+      - '.github/workflows/release-051.yml'
+      - 'maintenance/release-051-*.patch'
+permissions:
+  contents: write
+concurrency:
+  group: release-051-validation
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/scraping-051-20261001
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Apply reviewed changes against the known baseline
+        run: |
+          cat maintenance/release-051-*.patch | sed 's/^ diff --git /diff --git /' > /tmp/release-051.patch
+          git apply --check /tmp/release-051.patch
+          git apply /tmp/release-051.patch
+      - name: Install and compile
+        run: |
+          python -m pip install -r requirements-dev.txt
+          python -m compileall -q livros_baltigo
+      - name: Run isolated regression suite
+        run: python -m pytest -ra --junitxml=release-051-tests.xml
+      - name: Verify real public searches and PDF downloads without Telegram
+        run: |
+          python - <<'PY'
+          import asyncio, hashlib, json, pathlib
+          from livros_baltigo.open_http import OpenHTTP
+          from livros_baltigo.multisource_check import verify
+          output=pathlib.Path('public-051-verification')
+          captured=output/'responses'
+          captured.mkdir(parents=True,exist_ok=True)
+          original=OpenHTTP._get
+          manifest=[]
+          async def logged_get(self,url,*args,**kwargs):
+              try:
+                  raw,mime=await original(self,url,*args,**kwargs)
+                  item={'source':self.source,'url':url,'bytes':len(raw),'content_type':mime}
+                  if len(raw)<=2000000 and ('html' in mime or 'json' in mime):
+                      filename=hashlib.sha256(url.encode()).hexdigest()[:20]+'.txt'
+                      (captured/filename).write_bytes(raw)
+                      item['file']=filename
+                  manifest.append(item)
+                  return raw,mime
+              except Exception as exc:
+                  manifest.append({'source':self.source,'url':url,'error':getattr(exc,'code',type(exc).__name__)})
+                  raise
+              finally:
+                  (captured/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,indent=2))
+          OpenHTTP._get=logged_get
+          report=asyncio.run(verify(output))
+          raise SystemExit(0 if report['status']=='passed' else 1)
+          PY
+      - name: Commit verified code and reproducible report to the review branch only
+        run: |
+          python - <<'PY'
+          import datetime,json,pathlib,xml.etree.ElementTree as ET
+          p=pathlib.Path('public-051-verification/report.json')
+          report=json.loads(p.read_text())
+          root=ET.parse('release-051-tests.xml').getroot()
+          suites=list(root.iter('testsuite'))
+          report['automated_tests']={key:sum(int(s.get(key,0)) for s in suites) for key in ('tests','failures','errors','skipped')}
+          report['verified_at_utc']=datetime.datetime.now(datetime.timezone.utc).isoformat()
+          pathlib.Path('docs/PUBLIC_VERIFICATION_0.5.1.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
+          PY
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add livros_baltigo tests docs/PUBLIC_VERIFICATION_0.5.1.json
+          git commit -m 'fix: verified multiple catalogs, independent HTML scraping and empty-search regression'
+          git push origin HEAD:fix/scraping-051-20261001
+      - name: Preserve exact tested source even if a public source failed
+        if: always()
+        run: |
+          tar --exclude='__pycache__' -czf release-051-tested-source.tar.gz livros_baltigo tests requirements.txt requirements-dev.txt pyproject.toml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: release-051-verification
+          path: |
+            public-051-verification/
+            release-051-tests.xml
+            release-051-tested-source.tar.gz
+          retention-days: 7
