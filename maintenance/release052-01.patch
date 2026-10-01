@@ -1,0 +1,338 @@
+diff --git a/docs/SOURCES_FROM_LIST.md b/docs/SOURCES_FROM_LIST.md
+new file mode 100644
+index 0000000..ae4419f
+--- /dev/null
++++ b/docs/SOURCES_FROM_LIST.md
+@@ -0,0 +1,23 @@
++# Revisão da lista enviada — 1 de outubro de 2026
++
++Base: arquivo `Markdown colado(1).md`, fornecido pelo usuário. A lista contém bibliotecas, indexadores, quadrinhos, audiolivros, ferramentas e fontes tipográficas. Foram priorizados os catálogos de livros em PDF/EPUB; as outras categorias não foram apresentadas como fontes de livros do bot.
++
++## Integrados a partir da lista
++
++Project Gutenberg e Internet Archive: pesquisa e download de PDF foram verificados com os adaptadores reais. InfoLivros: o índice público de livros completos, as fichas estruturadas e os links anunciados de PDF foram utilizados na integração. A validação final de arquivos está registrada no relatório da versão.
++
++Z-Library: integração existente mantida; a consulta HTML não exige que o login EAPI funcione antes. Isso não remove a proteção do site nem confirma downloads da conta. Na verificação Railway da versão 0.5.1, o catálogo permaneceu indisponível por redirecionamento circular.
++
++## Avaliados, mas não habilitados como downloads
++
++- Open Library: a API de busca respondeu; é descoberta/metadados e pode apontar empréstimos. Não foi contada como uma nova fonte de PDF apenas por ser pesquisável.
++- eLivros: início e busca responderam; a consulta de Dom Casmurro também trouxe muitos títulos não correspondentes. O download não foi validado.
++- dLivros: início e busca responderam e incluíram Dom Casmurro. O download de arquivo não foi validado.
++- PDF Room: início e busca responderam. O arquivo final não foi validado.
++- Datassette: página inicial respondeu. Ainda não há adaptador validado de pesquisa e download neste bot.
++- Library Genesis: o domínio fornecido não pôde ser acessado no ambiente de teste. Isso não prova indisponibilidade mundial.
++- Baixe Livros: o teste anterior de catálogo retornou HTTP 403 no ambiente de verificação. Não foram usados proxies para contornar a recusa.
++
++Os demais endereços do arquivo não foram certificados nem habilitados automaticamente. Nenhuma conclusão sobre segurança ou direito de acesso decorre apenas de constarem na lista. Uma integração só deve ser apresentada como disponível quando a sua própria consulta e seu próprio arquivo forem verificáveis.
++
++USP e UFPB são fontes adicionais pesquisadas fora da lista, não sugestões atribuídas ao arquivo fornecido.
+diff --git a/livros_baltigo/__init__.py b/livros_baltigo/__init__.py
+index d559dd3..dbf0ce4 100644
+--- a/livros_baltigo/__init__.py
++++ b/livros_baltigo/__init__.py
+@@ -1,2 +1,2 @@
+ """Livros Baltigo — biblioteca no Telegram."""
+-__version__ = "0.5.1"
++__version__ = "0.5.2"
+diff --git a/livros_baltigo/__main__.py b/livros_baltigo/__main__.py
+index cf61f23..09c66eb 100644
+--- a/livros_baltigo/__main__.py
++++ b/livros_baltigo/__main__.py
+@@ -21,6 +21,7 @@ from .gutenberg import Gutenberg
+ from .catalogs import CatalogRouter
+ from .archive import InternetArchive
+ from .omp import UniversityBooks
++from .infolivros import InfoLivros
+ from urllib.parse import urlsplit
+ from .storage import Store
+ from .telegram import Telegram
+@@ -35,6 +36,7 @@ async def execute(settings: Settings, doctor=False):
+             raise ValueError("BOOK_SOURCE_MODE deve ser html ou api")
+         legacy = (HTMLSource if mode == "html" else ZLibrary)(settings, api, files)
+         extra = {name: (InternetArchive(settings, public_api, public_files) if name == "archive"
++                        else InfoLivros(settings, public_api, public_files) if name == "infolivros"
+                         else UniversityBooks(settings, public_api, public_files, name))
+                  for name in settings.extra_catalogs}
+         source = CatalogRouter(settings, legacy, Gutenberg(settings, public_api, public_files), extra)
+diff --git a/livros_baltigo/app.py b/livros_baltigo/app.py
+index 620c6b3..64e2da0 100644
+--- a/livros_baltigo/app.py
++++ b/livros_baltigo/app.py
+@@ -61,30 +61,8 @@ class BotApp:
+         if webhook.get("url"):
+             raise UserError("Este token já tem um webhook configurado. Use um bot novo ou remova conscientemente a integração anterior antes de iniciar polling.", "existing_webhook")
+         commands = [{"command": command, "description": description} for command, description in COMMANDS]
+-        # Substitui inclusive os menus antigos por idioma deixados por outras integrações.
+-        for language in ("", "pt", "en", "es"):
+-            for scope in ({"type": "default"}, {"type": "all_private_chats"}):
+-                try:
+-                    await self.tg.call("setMyCommands", {"commands": commands, "scope": scope, "language_code": language})
+-                except TelegramError as exc:
+-                    log.warning("Menu global pendente: código=%s", exc.code)
+-        for uid in self.settings.admin_ids:
+-            for language in ("", "pt", "en", "es"):
+-                try:
+-                    await self.tg.call("setMyCommands", {"commands": commands, "scope": {"type": "chat", "chat_id": uid}, "language_code": language})
+-                except TelegramError as exc:
+-                    # Um administrador que ainda não abriu o bot não impede o início.
+-                    log.warning("Menu individual pendente: código=%s", exc.code)
+-        for method, field, text in (
+-            ("setMyName", "name", self.settings.brand[:64]),
+-            ("setMyDescription", "description", "Sua próxima leitura começa aqui. Busque por título ou autor, salve seus favoritos e receba edições disponíveis em EPUB ou PDF. Tudo pelos botões, em português."),
+-            ("setMyShortDescription", "short_description", "Livros, favoritos e novas leituras. Busque pelo título ou autor, sem precisar decorar comandos."),
+-        ):
+-            for language in ("", "pt", "en", "es"):
+-                try:
+-                    await self.tg.call(method, {field: text, "language_code": language})
+-                except TelegramError as exc:
+-                    log.warning("Metadados não atualizados: método=%s; código=%s", method, exc.code)
++        from .interface import sync_interface
++        await sync_interface(self.tg, self.settings, commands, me.get("id"))
+         self.downloads.start()
+         log.info("Identidade Telegram validada: @%s; interface pt-BR; fonte=%s", self.username, "configurada_nao_validada" if self.settings.source_configured else "aguardando_credenciais")
+ 
+diff --git a/livros_baltigo/catalog.py b/livros_baltigo/catalog.py
+index 38f6dc8..8841160 100644
+--- a/livros_baltigo/catalog.py
++++ b/livros_baltigo/catalog.py
+@@ -15,7 +15,7 @@ LANGUAGES = {
+ }
+ SOURCES = {"auto": "Automático", "gutenberg": "Project Gutenberg",
+            "archive": "Internet Archive", "usp": "Livros Abertos USP",
+-           "ufpb": "Editora UFPB", "zlibrary": "Z-Library"}
++           "ufpb": "Editora UFPB", "infolivros": "InfoLivros", "zlibrary": "Z-Library"}
+ FORMATS = {"any": "EPUB e PDF", "epub": "EPUB", "pdf": "PDF"}
+ 
+ 
+diff --git a/livros_baltigo/catalogs.py b/livros_baltigo/catalogs.py
+index 250c39e..c38725f 100644
+--- a/livros_baltigo/catalogs.py
++++ b/livros_baltigo/catalogs.py
+@@ -89,7 +89,7 @@ class CatalogRouter:
+             raise UserError('Fonte de busca inválida.', 'invalid_source')
+         if spec.source != 'auto':
+             return await self._search_one(spec.source, spec, page, limit)
+-        first = [name for name in ('zlibrary', 'gutenberg', 'archive') if name in self.enabled]
++        first = [name for name in ('zlibrary', 'gutenberg', 'archive', 'infolivros') if name in self.enabled]
+         if time.monotonic() < self.legacy_retry_at and 'zlibrary' in first:
+             first.remove('zlibrary')
+         second = [name for name in ('usp', 'ufpb') if name in self.enabled]
+@@ -125,7 +125,7 @@ class CatalogRouter:
+         host = urlsplit(url).hostname or ''
+         if host in {'www.gutenberg.org', 'gutenberg.org'}:
+             return await self.provider('gutenberg').cover(url)
+-        for name in ('archive', 'usp', 'ufpb'):
++        for name in ('archive', 'usp', 'ufpb', 'infolivros'):
+             if name not in self.enabled:
+                 continue
+             provider = self.providers[name]
+diff --git a/livros_baltigo/config.py b/livros_baltigo/config.py
+index 9817c6d..4735866 100644
+--- a/livros_baltigo/config.py
++++ b/livros_baltigo/config.py
+@@ -57,8 +57,8 @@ class Settings:
+             raise ValueError("Preencha BOT_TOKEN com o token de um bot novo do BotFather.")
+         if not self.admin_ids:
+             raise ValueError("Preencha ADMIN_IDS. O bot não inicia sem administrador.")
+-        if not self.extra_catalogs <= {"archive", "usp", "ufpb"}:
+-            raise ValueError("PUBLIC_BOOK_SOURCES aceita archive, usp e ufpb.")
++        if not self.extra_catalogs <= {"archive", "usp", "ufpb", "infolivros"}:
++            raise ValueError("PUBLIC_BOOK_SOURCES aceita archive, usp, ufpb e infolivros.")
+         source_values = (self.base_url, self.user_id, self.user_key, self.email, self.password)
+         if not ((self.setup_mode or self.public_catalog or self.extra_catalogs) and not any(source_values)):
+             parts = urlsplit(self.base_url)
+@@ -104,7 +104,7 @@ class Settings:
+         try:
+             value = cls(
+                 public_catalog=public_catalog == "true",
+-                extra_catalogs=frozenset(x.strip() for x in get("PUBLIC_BOOK_SOURCES", "archive,usp,ufpb").split(",") if x.strip()),
++                extra_catalogs=frozenset(x.strip() for x in get("PUBLIC_BOOK_SOURCES", "archive,usp,ufpb,infolivros").split(",") if x.strip()),
+                 setup_mode=setup == "true",
+                 bot_token=get("BOT_TOKEN"), admin_ids=ids(get("ADMIN_IDS")),
+                 base_url=get("ZLIB_BASE_URL").rstrip("/"),
+diff --git a/livros_baltigo/infolivros.py b/livros_baltigo/infolivros.py
+new file mode 100644
+index 0000000..cd93189
+--- /dev/null
++++ b/livros_baltigo/infolivros.py
+@@ -0,0 +1,179 @@
++"""InfoLivros complete-book index and advertised free PDF links. No category articles."""
++from __future__ import annotations
++import asyncio
++import io
++import json
++import re
++import time
++from collections import OrderedDict
++from dataclasses import replace
++from decimal import Decimal, InvalidOperation
++from urllib.parse import urljoin, urlsplit
++from .catalog import normalized, LANGUAGES
++from .errors import UserError
++from .models import Book, SearchPage, plain
++from .open_http import OpenHTTP, document
++
++BASE = 'https://infolivros.org'
++SLUG = r'[a-z0-9]+(?:-[a-z0-9]+)*'
++
++
++class InfoLivros(OpenHTTP):
++    source = 'infolivros'
++    probe_query = 'Orgulho e Preconceito'
++
++    def __init__(self, settings, session, files):
++        super().__init__(settings, session, files)
++        self.index = None
++        self.index_until = 0.0
++        self.index_lock = asyncio.Lock()
++        self.record_lock = asyncio.Lock()
++        self.records = OrderedDict()
++
++    def allowed_url(self, url):
++        self.safe_url(url)
++        p = urlsplit(url)
++        allowed = ((p.hostname in {'infolivros.org', 'www.infolivros.org'} and p.path.startswith('/livro/'))
++                   or (p.hostname == 'pdf.infolivros.org' and p.path.startswith('/PT/') and p.path.lower().endswith('.pdf'))
++                   or (p.hostname == 'cdn.infolibros.org' and p.path.startswith('/images/')))
++        if not allowed or p.query or p.fragment:
++            raise UserError('Endereço externo não autorizado nesta fonte.', 'unsafe_url')
++        return url
++
++    def parse_index(self, raw):
++        soup = document(raw)
++        links = soup.select('a.az-book-link')
++        if not links or len(links) > 5000:
++            raise UserError('O índice de livros completos mudou de formato.', 'layout_changed')
++        books, seen = [], set()
++        for link in links:
++            url = self.allowed_url(urljoin(BASE, str(link.get('href', ''))))
++            match = re.fullmatch('/livro/(' + SLUG + ')/', urlsplit(url).path)
++            title = link.select_one('.az-book-title')
++            author = link.select_one('.az-book-author')
++            if not match or title is None or author is None:
++                raise UserError('Uma entrada do catálogo veio sem título, autor ou identificação.', 'layout_changed')
++            slug = match[1]
++            if slug in seen:
++                continue
++            seen.add(slug)
++            books.append(Book(slug, 'il_pdf', plain(title.get_text(' ', strip=True), 500),
++                plain(author.get_text(' ', strip=True), 500), 'portuguese', 'pdf',
++                source=self.source, source_url=BASE + '/livro/' + slug + '/', publisher='InfoLivros'))
++        return books
++
++    async def search(self, spec, page=1, limit=8):
++        if spec.language not in LANGUAGES or spec.extension not in {'any', 'pdf', 'epub'}:
++            raise UserError('Filtro inválido.', 'invalid_filter')
++        if not 1 <= page <= 1000 or not 1 <= limit <= 10 or not 1 <= len(spec.query.strip()) <= 200:
++            raise UserError('Busca inválida.', 'invalid_search')
++        if spec.language not in {'portuguese', 'any'} or spec.extension == 'epub':
++            return SearchPage([], page, False, source=self.source, notice='Esta integração consulta os livros completos em PDF e português do InfoLivros.')
++        async with self.index_lock:
++            if self.index is None or self.index_until <= time.monotonic():
++                raw, _ = await self._get(BASE + '/livro/')
++                self.index = self.parse_index(raw)
++                self.index_until = time.monotonic() + 86400
++            catalog = self.index
++        query = normalized(spec.query)
++        terms = [term for term in query.split() if term not in {'a','o','as','os','e','de','do','da','dos','das','por'}]
++        if not terms:
++            terms = query.split()
++        ranked = []
++        for book in catalog:
++            title, author = normalized(book.title), normalized(book.author)
++            if terms and all(term in title + ' ' + author for term in terms):
++                rank = 0 if title == query else 1 if title.startswith(query) else 2 if all(t in title for t in terms) else 3
++                ranked.append((rank, title, book.id, book))
++        books = [item[-1] for item in sorted(ranked, key=lambda x: x[:3])]
++        offset = (page - 1) * limit
++        return SearchPage(books[offset:offset+limit], page, offset+limit < len(books), len(books), self.source,
++            'Livros completos em PDF; não inclui os artigos e as coletâneas de links do site.')
++
++    def parse_record(self, raw, book):
++        soup = document(raw)
++        metadata = None
++        for script in soup.select('script[type="application/ld+json"]')[:20]:
++            try:
++                data = json.loads(script.get_text())
++            except (ValueError, TypeError):
++                continue
++            candidates = data if isinstance(data, list) else data.get('@graph', [data]) if isinstance(data, dict) else []
++            for item in candidates:
++                if isinstance(item, dict) and item.get('@type') == 'Book':
++                    metadata = item
++                    break
++        if not metadata or str(metadata.get('url', '')).rstrip('/') != book.source_url.rstrip('/'):
++            raise UserError('A ficha não corresponde à obra selecionada.', 'schema')
++        offers = metadata.get('offers')
++        try:
++            is_free = isinstance(offers, dict) and Decimal(str(offers.get('price', 'NaN'))) == 0
++        except InvalidOperation:
++            is_free = False
++        if not is_free or metadata.get('inLanguage') not in {'pt', 'pt-BR', 'pt_BR'}:
++            raise UserError('Esta edição não informa um PDF gratuito em português.', 'file_missing')
++        links = soup.select('a.pdf-download[href]')
++        urls = list(dict.fromkeys(self.allowed_url(str(a['href'])) for a in links))
++        urls = [url for url in urls if urlsplit(url).hostname == 'pdf.infolivros.org']
++        if len(urls) != 1:
++            raise UserError('A ficha não oferece um link único de PDF completo.', 'file_missing')
++        title = plain(metadata.get('name'), 500)
++        if not title:
++            raise UserError('A ficha não informou o título.', 'schema')
++        author = metadata.get('author', {})
++        if isinstance(author, list):
++            author = ', '.join(plain(a, 200) for a in author)
++        image = metadata.get('image', '')
++        if isinstance(image, dict):
++            image = image.get('url', '')
++        try:
++            cover = self.allowed_url(image) if image else ''
++        except UserError:
++            cover = ''
++        fresh = replace(book, title=title, author=plain(author, 500) or book.author,
++            description=plain(metadata.get('description'), 2500),
++            year=plain(metadata.get('datePublished'), 20)[:4], cover=cover)
++        return fresh, urls[0]
++
++    async def _record(self, book):
++        if book.source != self.source or not re.fullmatch(SLUG, book.id) or book.extension != 'pdf':
++            raise UserError('Edição InfoLivros inválida.', 'invalid_book')
++        expected = BASE + '/livro/' + book.id + '/'
++        if book.source_url != expected:
++            raise UserError('Origem da edição inválida.', 'invalid_book')
++        async with self.record_lock:
++            cached = self.records.get(book.key)
++            if cached and cached[0] > time.monotonic():
++                return cached[1:]
++            raw, _ = await self._get(expected)
++            fresh, url = self.parse_record(raw, book)
++            self.records[book.key] = (time.monotonic()+21600, fresh, url)
++            while len(self.records) > 128:
++                self.records.popitem(last=False)
++            return fresh, url
++
++    async def details(self, book):
++        return (await self._record(book))[0]
++
++    async def file_info(self, book):
++        fresh, url = await self._record(book)
++        return url, fresh.extension
++
++    async def cover(self, url):
++        try:
++            raw, mime = await self._get(url, 2_000_000, file=True)
++            if raw.startswith((b'\xff\xd8\xff', b'\x89PNG\r\n\x1a\n')):
++                return raw
++            if raw.startswith(b'RIFF') and raw[8:12] == b'WEBP':
++                from PIL import Image
++                with Image.open(io.BytesIO(raw)) as image:
++                    if image.width * image.height > 16_000_000:
++                        return None
++                    image.thumbnail((1280, 1280))
++                    result = io.BytesIO()
++                    image.convert('RGB').save(result, format='JPEG', quality=85)
++                    return result.getvalue()
++        except Exception:
++            # Cover failure must not prevent reading or downloading the edition.
++            pass
++        return None
