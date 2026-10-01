@@ -1,0 +1,389 @@
+diff --git a/livros_baltigo/omp.py b/livros_baltigo/omp.py
+new file mode 100644
+index 0000000..68eba70
+--- /dev/null
++++ b/livros_baltigo/omp.py
+@@ -0,0 +1,193 @@
++"""HTML adapters for university OMP catalogs, with edition-level CC verification."""
++from __future__ import annotations
++
++import asyncio
++import re
++import time
++from collections import OrderedDict
++from dataclasses import replace
++from urllib.parse import urlencode, urljoin, urlsplit
++
++from .errors import UserError
++from .gutenberg import LANGS
++from .models import Book, SearchPage, plain
++from .open_http import OpenHTTP, cc_license, document
++
++CATALOGS = {
++    'usp': ('https://www.livrosabertos.abcd.usp.br', '/portaldelivrosUSP', 'Livros Abertos USP'),
++    'ufpb': ('https://www.editora.ufpb.br', '/press5/index.php/UFPB', 'Editora UFPB'),
++}
++
++
++class UniversityBooks(OpenHTTP):
++    def __init__(self, settings, session, files, source='usp'):
++        super().__init__(settings, session, files)
++        if source not in CATALOGS:
++            raise ValueError('Unknown university catalog')
++        self.source = source
++        self.origin, self.prefix, self.name = CATALOGS[source]
++        self.host = urlsplit(self.origin).hostname
++        self.probe_query = 'Pesquisa em educação' if source == 'usp' else 'Cuidados em saúde bucal'
++        self.indices = OrderedDict()
++        self.records = OrderedDict()
++        self.index_lock = asyncio.Lock()
++        self.record_lock = asyncio.Lock()
++
++    def allowed_url(self, url):
++        candidate = urljoin(self.origin + '/', url)
++        self.safe_url(candidate)
++        p = urlsplit(candidate)
++        if p.hostname != self.host or not p.path.startswith((self.prefix + '/', '/public/')):
++            raise UserError('Endereço externo não autorizado nesta fonte.', 'unsafe_url')
++        return candidate
++
++    def parse_search(self, raw):
++        soup = document(raw)
++        if not soup.select_one('.page_search'):
++            raise UserError('A página de busca da universidade mudou de formato.', 'layout_changed')
++        cards = soup.select('.page_search .obj_monograph_summary')
++        if len(cards) > 1500:
++            raise UserError('A busca retornou muitas obras. Refine o título ou autor.', 'invalid_search')
++        result, seen = [], set()
++        for card in cards:
++            link = card.select_one('.title a[href]')
++            if not link:
++                raise UserError('Uma obra veio sem identificação.', 'layout_changed')
++            url = self.allowed_url(str(link['href']))
++            match = re.fullmatch(re.escape(self.prefix) + r'/catalog/book/(\d{1,9})/?', urlsplit(url).path)
++            if not match:
++                raise UserError('Identificação da obra universitária inválida.', 'layout_changed')
++            number = match[1]
++            if number not in seen:
++                result.append(number)
++                seen.add(number)
++        # OMP returns all matching monographs in these verified catalogs. If a
++        # future theme introduces pagination, do not silently lose its results.
++        if soup.select_one('.page_search a.next[href], .page_search a[rel=next]'):
++            raise UserError('A paginação da universidade mudou; refine a busca.', 'layout_changed')
++        return result
++
++    def parse_record(self, raw, number):
++        soup = document(raw)
++        block = soup.select_one('.obj_monograph_full')
++        if block is None:
++            raise UserError('A ficha da universidade mudou de formato.', 'layout_changed')
++        def meta(name):
++            return [str(n.get('content', '')).strip() for n in soup.select('meta[name]') if n.get('name') == name]
++        if meta('DC.Identifier') and str(number) not in meta('DC.Identifier'):
++            raise UserError('A ficha não corresponde ao livro selecionado.', 'schema')
++        title_node = block.select_one('h1.title')
++        title = plain(title_node.get_text(' ', strip=True), 500) if title_node else ''
++        if not title:
++            raise UserError('O título não foi informado pela fonte.', 'schema')
++        licenses = meta('DC.Rights') + [str(a.get('href', '')) for a in block.select('.item.license a[href]')]
++        license_url = cc_license(licenses)
++        if not license_url:
++            raise UserError('Esta edição não informa uma licença aberta verificável.', 'rights_unverified')
++        lang = (next(iter(meta('DC.Language')), '') or next(iter(meta('citation_language')), '')).casefold()
++        lang = lang.replace('-', '_').split('_')[0]
++        language = next((name for name, code in LANGS.items() if code == lang), lang)
++        authors = meta('citation_author') or meta('DC.Creator.PersonalName')
++        author = plain(', '.join(authors), 500) or 'Autor não informado'
++        abstract = block.select_one('.item.abstract .value')
++        description = plain(abstract.get_text(' ', strip=True), 2200) if abstract else ''
++        description += '\nLicença: ' + license_url
++        image = block.select_one('.item.cover img[src]')
++        cover = self.allowed_url(str(image['src'])) if image else ''
++        year = next(iter(meta('citation_publication_date')), '')[:4]
++        files = {}
++        for link in block.select('.item.files a.cmp_download_link[href]'):
++            label = link.get_text(' ', strip=True).casefold()
++            extension = 'epub' if 'epub' in label else 'pdf' if 'pdf' in label else ''
++            if not extension or extension in files:
++                continue
++            url = self.allowed_url(str(link['href']))
++            p = urlsplit(url)
++            pattern = re.escape(self.prefix) + r'/catalog/(?:view|download)/' + re.escape(number) + r'/\d+/\d+/?'
++            if not re.fullmatch(pattern, p.path) or p.query or p.fragment:
++                raise UserError('Link de edição universitária inválido.', 'unsafe_url')
++            # OMP advertises its viewer; /download is the corresponding file
++            # endpoint also present in citation_pdf_url for the verified edition.
++            url = url.replace('/catalog/view/', '/catalog/download/')
++            book = Book(number, 'omp_' + extension, title, author, language, extension,
++                        year=year, publisher=self.name, description=description,
++                        cover=cover, source=self.source,
++                        source_url=self.origin + self.prefix + '/catalog/book/' + number)
++            files[extension] = (book, url)
++        if not files:
++            raise UserError('Esta ficha não oferece um PDF ou EPUB integral aberto.', 'file_missing')
++        return files
++
++    async def _record(self, number):
++        if not isinstance(number, str) or not re.fullmatch(r'\d{1,9}', number):
++            raise UserError('Obra universitária inválida.', 'invalid_book')
++        async with self.record_lock:
++            cached = self.records.get(number)
++            if cached and cached[0] > time.monotonic():
++                self.records.move_to_end(number)
++                return cached[1]
++            raw, _ = await self._get(self.origin + self.prefix + '/catalog/book/' + number)
++            records = self.parse_record(raw, number)
++            self.records[number] = (time.monotonic() + 21600, records)
++            while len(self.records) > 256:
++                self.records.popitem(last=False)
++            return records
++
++    async def search(self, spec, page=1, limit=8):
++        if spec.language not in {*LANGS, 'any'} or spec.extension not in {'any', 'pdf', 'epub'}:
++            raise UserError('Filtro inválido.', 'invalid_filter')
++        if not 1 <= page <= 1000 or not 1 <= limit <= 10 or not 1 <= len(spec.query.strip()) <= 200:
++            raise UserError('Busca inválida.', 'invalid_search')
++        key = (spec.query.casefold(), spec.language, spec.extension)
++        async with self.index_lock:
++            snapshot = self.indices.get(key)
++            if not snapshot or snapshot['expires'] <= time.monotonic():
++                raw, _ = await self._get(self.origin + self.prefix + '/search?' + urlencode({'query': spec.query}))
++                snapshot = {'expires': time.monotonic() + self.settings.search_ttl,
++                            'ids': self.parse_search(raw), 'cursor': 0, 'books': [], 'skipped': 0}
++                self.indices[key] = snapshot
++                while len(self.indices) > 64:
++                    self.indices.popitem(last=False)
++            start = (page - 1) * limit
++            stop = start + limit
++            examined = 0
++            while len(snapshot['books']) <= stop and snapshot['cursor'] < len(snapshot['ids']):
++                if examined >= 12:
++                    # Continue on the next page without claiming the source is empty.
++                    if len(snapshot['books']) < stop:
++                        raise UserError('Muitas obras sem este idioma/formato. Refine a busca ou amplie os filtros.', 'refine_search')
++                    break
++                number = snapshot['ids'][snapshot['cursor']]
++                try:
++                    records = await self._record(number)
++                except UserError as exc:
++                    if exc.code not in {'file_missing', 'rights_unverified'}:
++                        raise
++                    snapshot['skipped'] += 1
++                    records = {}
++                snapshot['cursor'] += 1
++                examined += 1
++                for extension in ('pdf', 'epub'):
++                    if extension not in records or spec.extension not in {'any', extension}:
++                        continue
++                    book = records[extension][0]
++                    if spec.language == 'any' or spec.language == book.language:
++                        snapshot['books'].append(book)
++            more = len(snapshot['books']) > stop or snapshot['cursor'] < len(snapshot['ids'])
++            notice = 'Edições abertas da universidade; a licença e a origem constam da ficha.'
++            if snapshot['skipped']:
++                notice += ' Fichas sem arquivo integral ou licença aberta foram excluídas.'
++            return SearchPage(snapshot['books'][start:stop], page, more, source=self.source, notice=notice)
++
++    async def details(self, book):
++        if book.source != self.source:
++            raise UserError('Fonte da edição inválida.', 'invalid_book')
++        entry = (await self._record(book.id)).get(book.extension)
++        if not entry:
++            raise UserError('Este formato não está disponível; escolha outra edição.', 'file_missing')
++        return entry[0]
++
++    async def file_info(self, book):
++        await self.details(book)
++        entry = (await self._record(book.id))[book.extension]
++        return entry[1], book.extension
+ diff --git a/livros_baltigo/open_http.py b/livros_baltigo/open_http.py
+new file mode 100644
+index 0000000..5a3fa6b
+--- /dev/null
++++ b/livros_baltigo/open_http.py
+@@ -0,0 +1,147 @@
++"""Bounded anonymous HTTP for independent open catalogs. No credentials or proxies."""
++from __future__ import annotations
++
++import asyncio
++import io
++import json
++import re
++import time
++import zipfile
++from pathlib import Path
++from urllib.parse import unquote, urlsplit
++
++import aiohttp
++from bs4 import BeautifulSoup
++
++from .availability import retry_after_seconds
++from .errors import UserError
++from .network import limited_body, validate_url
++
++
++def document(raw: bytes):
++    if len(raw) > 2_000_000:
++        raise UserError('A página do catálogo excedeu o limite.', 'response_too_large')
++    soup = BeautifulSoup(raw, 'html.parser')
++    title = soup.title.get_text(' ', strip=True).casefold() if soup.title else ''
++    if soup.select_one('#challenge-form, #cf-challenge-running, .h-captcha, .g-recaptcha') or title in {
++        'just a moment...', 'attention required! | cloudflare', 'access denied', 'access refused'
++    }:
++        raise UserError('A fonte exige verificação humana. Escolha outro catálogo.', 'captcha')
++    return soup
++
++
++def read_json(raw: bytes):
++    try:
++        data = json.loads(raw)
++    except (ValueError, UnicodeError) as exc:
++        raise UserError('O catálogo retornou metadados inválidos.', 'schema') from exc
++    if not isinstance(data, dict):
++        raise UserError('O catálogo retornou metadados inválidos.', 'schema')
++    return data
++
++
++def cc_license(values) -> str:
++    """Accept explicit Creative Commons edition licenses, not generic site footers."""
++    for value in values:
++        if not isinstance(value, str):
++            continue
++        p = urlsplit(value.strip())
++        if (p.scheme in {'https', 'http'} and p.hostname in {'creativecommons.org', 'www.creativecommons.org'}
++                and re.fullmatch(r'/(?:licenses/(?:by|by-sa|by-nd|by-nc|by-nc-sa|by-nc-nd)/[1-4]\.0(?:/[a-z]{2})?|publicdomain/(?:mark|zero)/1\.0)/?', p.path)):
++            return 'https://creativecommons.org' + p.path
++    return ''
++
++
++class OpenHTTP:
++    requires_quota = False
++    request_interval = 1.1
++
++    def __init__(self, settings, session, files):
++        self.settings, self.api, self.files = settings, session, files
++        self.gate = asyncio.Lock()
++        self.last = 0.0
++        self.retry_at = 0.0
++        self.retry_code = ''
++
++    def allowed_url(self, url: str) -> str:
++        """Subclasses must authorize every request and every redirect."""
++        raise NotImplementedError
++
++    def safe_url(self, url: str) -> str:
++        p = urlsplit(url)
++        decoded = unquote(p.path)
++        if '\\' in decoded or any(part in {'.', '..'} for part in decoded.split('/')):
++            raise UserError('Caminho de arquivo inválido.', 'unsafe_url')
++        return validate_url(url)
++
++    async def _get(self, url: str, limit=2_000_000, *, file=False):
++        current = self.allowed_url(url)
++        session = self.files if file else self.api
++        try:
++            for _ in range(5):
++                async with self.gate:
++                    if time.monotonic() < self.retry_at:
++                        raise UserError('A fonte está em pausa após recusar o acesso. Escolha outra.', self.retry_code)
++                    await asyncio.sleep(max(0, self.last + self.request_interval - time.monotonic()))
++                    self.last = time.monotonic()
++                async with session.get(current, allow_redirects=False,
++                        headers={'User-Agent': 'LivrosBaltigo/0.5.1 (public ebook catalog client)'},
++                        timeout=aiohttp.ClientTimeout(total=35, connect=10, sock_read=25)) as response:
++                    if response.status in {301, 302, 303, 307, 308}:
++                        from urllib.parse import urljoin
++                        location = response.headers.get('Location')
++                        if not location:
++                            raise UserError('A fonte retornou um redirecionamento incompleto.', 'schema')
++                        current = self.allowed_url(urljoin(current, location))
++                        continue
++                    if response.status in {401, 403, 429, 503, 513}:
++                        self.retry_code = 'rate_limit' if response.status == 429 else 'blocked'
++                        self.retry_at = time.monotonic() + max(60, retry_after_seconds(response.headers.get('Retry-After')))
++                        raise UserError('A fonte recusou o acesso. Nenhum bloqueio foi contornado; escolha outro catálogo.', self.retry_code)
++                    if response.status != 200:
++                        raise UserError('O arquivo ou catálogo não está disponível agora.', 'file_missing' if response.status == 404 else 'unavailable')
++                    length = response.headers.get('Content-Length', '')
++                    if length.isdigit() and int(length) > limit:
++                        raise UserError('O arquivo excede o limite de envio do bot.', 'file_too_large')
++                    raw = await limited_body(response, limit)
++                    # A server may close cleanly with truncated content when it reports no length.
++                    return raw, response.headers.get('Content-Type', '').lower()
++            raise UserError('A fonte redirecionou muitas vezes.', 'redirect_loop')
++        except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
++            raise UserError('A fonte demorou a responder. Escolha outro catálogo ou tente mais tarde.', 'source_timeout') from exc
++
++    async def download(self, url, extension, destination: Path, progress):
++        try:
++            raw, mime = await self._get(url, self.settings.max_file_bytes, file=True)
++            if any(t in mime for t in ('text/html', 'application/json', 'javascript')):
++                raise UserError('A fonte enviou uma página, não um livro.', 'invalid_file')
++            if extension == 'pdf':
++                if not raw.startswith(b'%PDF-') or b'%%EOF' not in raw[-4096:]:
++                    raise UserError('O PDF recebido está incompleto ou não é válido.', 'invalid_file')
++            elif extension == 'epub':
++                try:
++                    with zipfile.ZipFile(io.BytesIO(raw)) as package:
++                        info = package.getinfo('mimetype')
++                        if info.file_size > 128 or package.read(info) != b'application/epub+zip' or 'META-INF/container.xml' not in package.namelist():
++                            raise ValueError('invalid EPUB structure')
++                except (zipfile.BadZipFile, KeyError, ValueError, RuntimeError) as exc:
++                    raise UserError('O EPUB recebido está incompleto ou não é válido.', 'invalid_file') from exc
++            else:
++                raise UserError('Escolha uma edição PDF ou EPUB.', 'unsupported_format')
++            await progress(len(raw), len(raw))
++            # A bounded <=49MB write is synchronous to prevent a cancelled thread
++            # recreating a file after the worker has removed its temporary directory.
++            destination.write_bytes(raw)
++            return len(raw)
++        except BaseException:
++            destination.unlink(missing_ok=True)
++            raise
++
++    async def cover(self, url):
++        if not url:
++            return None
++        try:
++            raw, _ = await self._get(url, 2_000_000, file=True)
++            return raw if raw.startswith((b'\xff\xd8\xff', b'\x89PNG\r\n\x1a\n')) else None
++        except UserError:
++            return None
+ diff --git a/livros_baltigo/scraper.py b/livros_baltigo/scraper.py
+index ce1f6bd..a5e4541 100644
+--- a/livros_baltigo/scraper.py
++++ b/livros_baltigo/scraper.py
+@@ -120,7 +120,9 @@ class HTMLSource(ZLibrary):
+         self.html_pages = {}
+ 
+     async def get_html(self, path: str) -> str:
+-        await self.ensure_login()
++        # Catalogue HTML is read independently of the account/EAPI login.
++        # Public search never sends account credentials; file requests still
++        # use the authenticated provider and its actual quota.
+         current = same_origin(self.base, path)
+         async with self.html_lock:
+             self.check_pause()
+@@ -128,7 +130,7 @@ class HTMLSource(ZLibrary):
+             self.last_html = time.monotonic()
+             try:
+                 for _ in range(4):
+-                    async with self.api.get(current, headers={**self._headers(), 'Accept': 'text/html'}, allow_redirects=False) as response:
++                    async with self.api.get(current, headers={'Accept': 'text/html'}, allow_redirects=False) as response:
+                         code = response.status
+                         if code in {301, 302, 303, 307, 308}:
+                             location = response.headers.get('Location', '')
+@@ -136,9 +138,9 @@ class HTMLSource(ZLibrary):
+                                 raise UserError('Redirecionamento sem destino.', 'html_redirect')
+                             current = same_origin(self.base, urljoin(current, location))
+                             continue
+-                        if code in {401, 403, 429}:
+-                            error = {401: 'html_auth', 403: 'blocked', 429: 'rate_limit'}[code]
+-                            self.pause(error, retry_after_seconds(response.headers.get('Retry-After')) if code == 429 else 60)
++                        if code in {401, 403, 429, 513}:
++                            error = {401: 'html_auth', 403: 'blocked', 429: 'rate_limit', 513: 'source_protected'}[code]
++                            self.pause(error, retry_after_seconds(response.headers.get('Retry-After')) if code == 429 else 300 if code == 513 else 60)
+                             self.check_pause()
+                         if code != 200:
+                             raise UserError('A página solicitada não está disponível.', 'not_found' if code == 404 else 'unavailable')
