@@ -10,15 +10,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Inspect public resources without credentials
+      - name: Inspect documented public feed and sample ebook
         run: |
           mkdir -p public-catalog
           python3 - <<'PY'
           import json, pathlib, time, urllib.request, urllib.error
           targets = {
-              'mec-dom-casmurro.pdf': 'https://dominiopublico.mec.gov.br/download/texto/bv00180a.pdf',
-              'gutenberg-search.json': 'https://gutendex.com/books/?search=Dom%20Casmurro&languages=pt&copyright=false',
-              'gutenberg-author.json': 'https://gutendex.com/books/?search=Machado&languages=pt&copyright=false',
+              'gutenberg-search.xml': 'https://www.gutenberg.org/ebooks/search.opds/?query=Dom%20Casmurro',
+              'gutenberg-55752.rdf': 'https://www.gutenberg.org/cache/epub/55752/pg55752.rdf',
+              'gutenberg-55752.txt': 'https://www.gutenberg.org/cache/epub/55752/pg55752.txt',
           }
           report = []
           class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -28,7 +28,7 @@ jobs:
           for name, url in targets.items():
               try:
                   request = urllib.request.Request(url, headers={'User-Agent':'LivrosBaltigo/0.5 public-catalog-check'})
-                  with opener.open(request, timeout=30) as response:
+                  with opener.open(request, timeout=25) as response:
                       data = response.read(2000001)
                       if len(data) > 2000000:
                           raise ValueError('response_too_large')
@@ -38,7 +38,7 @@ jobs:
                   report.append({'file':name,'status':exc.code,'error':'http_error'})
               except Exception as exc:
                   report.append({'file':name,'error':type(exc).__name__})
-              time.sleep(1)
+              time.sleep(2)
           pathlib.Path('public-catalog/report.json').write_text(json.dumps(report, indent=2))
           print(json.dumps(report, indent=2))
           PY
