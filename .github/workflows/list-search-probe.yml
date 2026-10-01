@@ -1,0 +1,47 @@
+name: Supplied catalog search inspection
+on:
+  push:
+    paths:
+      - '.github/workflows/list-search-probe.yml'
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Inspect observed catalog interfaces
+        run: |
+          python3 - <<'PY'
+          import concurrent.futures,json,pathlib,urllib.request,urllib.error,urllib.parse
+          out=pathlib.Path('catalog-search-probe');out.mkdir()
+          targets={
+            'elivros-search.html':'https://elivros.info/Search?q=Dom+Casmurro',
+            'dlivros-search.html':'https://dlivros.com/Buscar?q=Dom+Casmurro',
+            'infolivros-index.html':'https://infolivros.org/livro/',
+            'infolivros-book.html':'https://infolivros.org/livro/orgulho-e-preconceito-jane-austen/',
+            'infolivros-search.js':'https://infolivros.org/_astro/SearchModal.astro_astro_type_script_index_0_lang.BLfPbLEM.js',
+            'pdfroom-search.html':'https://pdfroom.com/search?query=Dom+Casmurro'
+          }
+          class SafeRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self,req,fp,code,msg,headers,newurl):
+                  if urllib.parse.urlsplit(newurl).scheme!='https':raise ValueError('insecure_redirect')
+                  return super().redirect_request(req,fp,code,msg,headers,newurl)
+          def check(item):
+              name,url=item;rec={'file':name,'url':url}
+              try:
+                  with urllib.request.build_opener(SafeRedirect()).open(urllib.request.Request(url,headers={'User-Agent':'LivrosBaltigo/0.5.1 public-catalog-validation'}),timeout=18) as r:
+                      raw=r.read(2000001)
+                      if len(raw)>2000000:raise ValueError('response_too_large')
+                      out.joinpath(name).write_bytes(raw);rec.update(status=r.status,bytes=len(raw),final_url=r.url,content_type=r.headers.get('Content-Type'))
+              except urllib.error.HTTPError as e:rec.update(status=e.code,error='http_error')
+              except Exception as e:rec.update(error=type(e).__name__)
+              return rec
+          with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:report=list(pool.map(check,targets.items()))
+          out.joinpath('report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2));print(json.dumps(report,ensure_ascii=False,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: catalog-search-probe
+          path: catalog-search-probe/
+          retention-days: 7
