@@ -1,0 +1,53 @@
+name: Supplied source list probe
+on:
+  push:
+    paths:
+      - '.github/workflows/list-sources-probe.yml'
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Inspect public catalog pages without credentials
+        run: |
+          python3 - <<'PY'
+          import concurrent.futures, hashlib, json, pathlib, urllib.request, urllib.error, urllib.parse
+          out=pathlib.Path('source-list-probe'); out.mkdir()
+          targets={
+            'infolivros-home.html':'https://infolivros.org/',
+            'infolivros-catalog.html':'https://infolivros.org/livros/',
+            'elivros-home.html':'https://elivros.info/',
+            'dlivros-home.html':'https://dlivros.com/',
+            'datassette-home.html':'https://datassette.org/',
+            'pdfroom-home.html':'https://pdfroom.com/',
+            'libgen-home.html':'https://libgen.is/',
+            'openlibrary-search.json':'https://openlibrary.org/search.json?q=Dom+Casmurro&limit=3&fields=key,title,author_name,ia,ebook_access',
+          }
+          class OrdinaryRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self,req,fp,code,msg,headers,newurl):
+                  if urllib.parse.urlsplit(newurl).scheme!='https':
+                      raise ValueError('insecure_redirect')
+                  return super().redirect_request(req,fp,code,msg,headers,newurl)
+          def check(item):
+              name,url=item; record={'file':name,'url':url}
+              try:
+                  opener=urllib.request.build_opener(OrdinaryRedirect())
+                  with opener.open(urllib.request.Request(url,headers={'User-Agent':'LivrosBaltigo/0.5.1 public-catalog-validation'}),timeout=18) as r:
+                      raw=r.read(1500001)
+                      if len(raw)>1500000:raise ValueError('response_too_large')
+                      out.joinpath(name).write_bytes(raw)
+                      record.update(status=r.status,bytes=len(raw),final_url=r.url,content_type=r.headers.get('Content-Type'))
+              except urllib.error.HTTPError as e:record.update(status=e.code,error='http_error')
+              except Exception as e:record.update(error=type(e).__name__)
+              return record
+          with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool: report=list(pool.map(check,targets.items()))
+          out.joinpath('report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
+          print(json.dumps(report,ensure_ascii=False,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-list-probe
+          path: source-list-probe/
+          retention-days: 7
