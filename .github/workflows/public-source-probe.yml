@@ -1,0 +1,47 @@
+name: Public catalog probe
+on:
+  push:
+    paths:
+      - '.github/workflows/public-source-probe.yml'
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Inspect public catalog without credentials
+        run: |
+          mkdir -p public-catalog
+          python3 - <<'PY'
+          import json, pathlib, time, urllib.request, urllib.parse, urllib.error
+          origin = 'https://dominiopublico.mec.gov.br'
+          params = urllib.parse.urlencode({'co_midia':'2','co_categoria':'','co_idioma':'1','ds_titulo':'Dom Casmurro','no_autor':'','select_action':'Submit','pagina':'1','first':'50','skip':'0'})
+          targets = {'form.html': '/pesquisa/PesquisaObraForm.jsp', 'results.html': '/pesquisa/ResultadoPesquisaObraForm.do?' + params, 'details.html': '/pesquisa/DetalheObraForm.do?co_obra=1888&select_action='}
+          report = []
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+          opener = urllib.request.build_opener(NoRedirect())
+          for name, path in targets.items():
+              try:
+                  request = urllib.request.Request(origin + path, headers={'User-Agent':'LivrosBaltigo/0.5 public-catalog-check'})
+                  with opener.open(request, timeout=25) as response:
+                      data = response.read(2000001)
+                      if len(data) > 2000000:
+                          raise ValueError('response_too_large')
+                      pathlib.Path('public-catalog', name).write_bytes(data)
+                      report.append({'file':name,'status':response.status,'bytes':len(data),'content_type':response.headers.get('Content-Type')})
+              except urllib.error.HTTPError as exc:
+                  report.append({'file':name,'status':exc.code,'error':'http_error'})
+              except Exception as exc:
+                  report.append({'file':name,'error':type(exc).__name__})
+              time.sleep(1)
+          pathlib.Path('public-catalog/report.json').write_text(json.dumps(report, indent=2))
+          print(json.dumps(report, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: public-catalog-responses
+          path: public-catalog/
+          retention-days: 3
