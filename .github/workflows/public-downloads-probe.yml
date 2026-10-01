@@ -1,0 +1,48 @@
+name: Public downloads probe
+on:
+  push:
+    branches: ['fix/scraping-051-20261001']
+    paths: ['.github/workflows/public-downloads-probe.yml']
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Bounded public metadata and file checks
+        run: |
+          mkdir -p downloads-probe
+          python3 - <<'PY'
+          import concurrent.futures, hashlib, json, pathlib, urllib.request, urllib.error, urllib.parse
+          out=pathlib.Path('downloads-probe')
+          targets={
+            'archive-metadata.json':'https://archive.org/metadata/domCasmurroMachado',
+            'archive-filtered.json':'https://archive.org/advancedsearch.php?'+urllib.parse.urlencode({'q':'mediatype:texts AND (title:(Dom Casmurro) OR creator:(Dom Casmurro)) AND language:por AND licenseurl:*publicdomain* AND -collection:inlibrary AND -access-restricted-item:true','output':'json','rows':25,'fl[]':'identifier,title,creator,language,licenseurl,rights,format,year,description'}),
+            'usp.pdf':'https://www.livrosabertos.abcd.usp.br/portaldelivrosUSP/catalog/download/1658/1510/5988',
+            'usp-empty.html':'https://www.livrosabertos.abcd.usp.br/portaldelivrosUSP/search?query=zzqvnonexistentbookzz',
+            'funag-search.html':'https://funag.gov.br/loja/index.php?route=product/search&search=Brasil',
+            'camara-search.html':'https://livraria.camara.leg.br/catalogsearch/result/?q=Machado',
+            'ufpb-search.html':'https://www.editora.ufpb.br/sistema/press5/index.php/UFPB/search?query=educa%C3%A7%C3%A3o'
+          }
+          def get(pair):
+              name,url=pair;item={'file':name,'url':url}
+              try:
+                  with urllib.request.urlopen(urllib.request.Request(url,headers={'User-Agent':'LivrosBaltigo/0.5 (public catalog client)'}),timeout=25) as r:
+                      maximum=20000000 if name.endswith('.pdf') else 2000000
+                      raw=r.read(maximum+1)
+                      if len(raw)>maximum:raise ValueError('response_too_large')
+                      (out/name).write_bytes(raw)
+                      item.update(status=r.status,bytes=len(raw),final_url=r.url,content_type=r.headers.get('Content-Type'),sha256=hashlib.sha256(raw).hexdigest())
+              except urllib.error.HTTPError as e:item.update(status=e.code,error='http_error')
+              except Exception as e:item['error']=type(e).__name__
+              return item
+          with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:report=list(pool.map(get,targets.items()))
+          (out/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
+          print(json.dumps(report,ensure_ascii=False,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: public-downloads-responses
+          path: downloads-probe/
+          retention-days: 7
