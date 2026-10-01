@@ -1,0 +1,48 @@
+name: Multiple sources probe
+on:
+  push:
+    branches: ['fix/scraping-051-20261001']
+    paths: ['.github/workflows/multiple-sources-probe.yml']
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Inspect independent public catalogs without credentials
+        run: |
+          mkdir -p multi-probe
+          python3 - <<'PY'
+          import concurrent.futures, json, pathlib, urllib.request, urllib.error, urllib.parse
+          out=pathlib.Path('multi-probe')
+          targets={
+            'baixelivros-search.html':'https://www.baixelivros.com.br/?s=Dom+Casmurro',
+            'baixelivros-empty.html':'https://www.baixelivros.com.br/?s=zzqvnonexistentbookzz',
+            'usp-search.html':'https://www.livrosabertos.abcd.usp.br/portaldelivrosUSP/search?query=educa%C3%A7%C3%A3o',
+            'usp-details.html':'https://www.livrosabertos.abcd.usp.br/portaldelivrosUSP/catalog/book/1658',
+            'scielo-search.html':'https://books.scielo.org/?s=educa%C3%A7%C3%A3o',
+            'archive-search.json':'https://archive.org/advancedsearch.php?'+urllib.parse.urlencode({'q':'mediatype:texts AND title:(Dom Casmurro) AND -collection:inlibrary','output':'json','rows':'3','fl[]':'identifier,title,creator,language,licenseurl,rights'})
+          }
+          def get(pair):
+              name,url=pair
+              item={'file':name,'url':url}
+              try:
+                  request=urllib.request.Request(url,headers={'User-Agent':'LivrosBaltigo/0.5 (public catalog client)'})
+                  with urllib.request.urlopen(request,timeout=25) as r:
+                      raw=r.read(2000001)
+                      if len(raw)>2000000: raise ValueError('response_too_large')
+                      (out/name).write_bytes(raw)
+                      item.update(status=r.status,bytes=len(raw),final_url=r.url,content_type=r.headers.get('Content-Type'))
+              except urllib.error.HTTPError as e:item.update(status=e.code,error='http_error')
+              except Exception as e:item['error']=type(e).__name__
+              return item
+          with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool: report=list(pool.map(get,targets.items()))
+          (out/'report.json').write_text(json.dumps(report,ensure_ascii=False,indent=2))
+          print(json.dumps(report,ensure_ascii=False,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: multiple-sources-responses
+          path: multi-probe/
+          retention-days: 7
