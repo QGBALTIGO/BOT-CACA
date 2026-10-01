@@ -1,0 +1,213 @@
+--- a/livros_baltigo/infolivros.py
++++ b/livros_baltigo/infolivros.py
+@@ -20,6 +20,7 @@
+ 
+ class InfoLivros(OpenHTTP):
+     source = 'infolivros'
++    supports_delivery = False  # Live PDF endpoint refused the server; do not retry as a download source.
+     probe_query = 'Orgulho e Preconceito'
+ 
+     def __init__(self, settings, session, files):
+@@ -88,7 +89,7 @@
+         books = [item[-1] for item in sorted(ranked, key=lambda x: x[:3])]
+         offset = (page - 1) * limit
+         return SearchPage(books[offset:offset+limit], page, offset+limit < len(books), len(books), self.source,
+-            'Livros completos em PDF; não inclui os artigos e as coletâneas de links do site.')
++            'Consulta de livros completos. O acesso é pelo site; envio de PDF pelo bot indisponível nesta fonte.')
+ 
+     def parse_record(self, raw, book):
+         soup = document(raw)
+@@ -153,11 +154,15 @@
+             return fresh, url
+ 
+     async def details(self, book):
+-        return (await self._record(book))[0]
++        if book.source != self.source or not re.fullmatch(SLUG, book.id) or book.source_url != BASE + '/livro/' + book.id + '/':
++            raise UserError('Origem da edição inválida.', 'invalid_book')
++        return replace(book, description='Acesso pelo site da fonte. O endpoint de PDF recusou o servidor; este catálogo não envia arquivos pelo bot.')
+ 
+     async def file_info(self, book):
+-        fresh, url = await self._record(book)
+-        return url, fresh.extension
++        raise UserError('Esta fonte está disponível apenas para consulta. Abra o livro no site.', 'external_only')
++
++    async def download(self, url, extension, destination, progress):
++        raise UserError('Esta fonte não envia arquivos pelo bot. Use Abrir no site.', 'external_only')
+ 
+     async def cover(self, url):
+         try:
+--- a/livros_baltigo/jobs.py
++++ b/livros_baltigo/jobs.py
+@@ -65,6 +65,9 @@
+                 raise UserError("Você já tem um livro na fila ou em envio. Aguarde a conclusão desse pedido.", "duplicate_job")
+             if self.queue.full():
+                 raise UserError("A fila está cheia. Tente novamente mais tarde.", "queue_full")
++            provider = self.source.for_book(book) if isinstance(self.source, CatalogRouter) else self.source
++            if getattr(provider, "supports_delivery", True) is False:
++                raise UserError("Esta fonte é somente consulta. Abra a ficha e toque em Abrir no site.", "external_only")
+             if book.extension not in {"pdf", "epub"}:
+                 raise UserError("Escolha uma edição EPUB ou PDF.", "unsupported_format")
+             if book.size is not None and book.size > self.settings.max_file_bytes:
+--- a/livros_baltigo/views.py
++++ b/livros_baltigo/views.py
+@@ -26,7 +26,12 @@
+ 
+ def book_keyboard(book: Book, favorite: bool, back: str = ""):
+     rows = []
+-    if book.extension in {"pdf", "epub"}:
++    if book.source == "infolivros":
++        import re
++        expected = "https://infolivros.org/livro/" + book.id + "/"
++        if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", book.id) and book.source_url == expected:
++            rows.append([{"text": "🌐 Abrir no site", "url": expected}])
++    elif book.extension in {"pdf", "epub"}:
+         rows.append([button(f"📥 Receber {book.extension.upper()}", f"download:{book.key}")])
+     extra = ":" + back.split(":", 1)[1] if back.startswith("editions:") else ""
+     rows.append([button("🔖 Remover dos favoritos" if favorite else "🔖 Salvar nos favoritos", f"favorite:{book.key}:{0 if favorite else 1}{extra}")])
+@@ -48,6 +53,8 @@
+     if book.publisher:
+         bits.append(f"Editora: {esc(book.publisher, 70)}")
+     bits.append(f"Fonte: {esc(SOURCES.get(book.source, book.source), 60)}")
++    if book.source == 'infolivros':
++        bits.append('Consulta externa; esta fonte não envia PDF pelo bot.')
+     if book.source == 'gutenberg' and book.extension == 'pdf':
+         bits.append('PDF diagramado do texto integral; não é fac-símile.')
+     if detailed and book.description:
+@@ -242,5 +249,5 @@
+                   '<b>Internet Archive</b>: arquivos públicos marcados como domínio público, sem empréstimos.',
+                   '<b>USP</b>: livros acadêmicos com licença aberta verificada na ficha.',
+                   '<b>UFPB</b>: PDFs gratuitos disponibilizados pela editora; os direitos autorais são preservados.',
+-                  '<b>InfoLivros</b>: índice de livros completos em português, com PDFs anunciados pela própria fonte.'])
++                  '<b>InfoLivros</b>: somente consulta, com botão Abrir no site. O download pelo servidor foi recusado.'])
+     return '\n'.join(lines)
+--- a/livros_baltigo/catalogs.py
++++ b/livros_baltigo/catalogs.py
+@@ -89,14 +89,15 @@
+             raise UserError('Fonte de busca inválida.', 'invalid_source')
+         if spec.source != 'auto':
+             return await self._search_one(spec.source, spec, page, limit)
+-        first = [name for name in ('zlibrary', 'gutenberg', 'archive', 'infolivros') if name in self.enabled]
++        first = [name for name in ('zlibrary', 'gutenberg', 'archive') if name in self.enabled]
+         if time.monotonic() < self.legacy_retry_at and 'zlibrary' in first:
+             first.remove('zlibrary')
+         second = [name for name in ('usp', 'ufpb') if name in self.enabled]
+-        if not first and not second:
++        third = ['infolivros'] if 'infolivros' in self.enabled else []
++        if not first and not second and not third:
+             raise UserError('Nenhuma fonte está disponível agora. Consulte /fontes.', 'catalog_unavailable')
+         failures, empty = [], None
+-        for batch in (first, second):
++        for batch in (first, second, third):
+             responses = await asyncio.gather(*(self._search_one(name, spec, page, limit) for name in batch), return_exceptions=True)
+             for source, result in zip(batch, responses):
+                 if isinstance(result, BaseException):
+--- a/livros_baltigo/multisource_check.py
++++ b/livros_baltigo/multisource_check.py
+@@ -39,6 +39,13 @@
+                 empty = await provider.search(SearchSpec('zzqvnonexistentbookzz', 'portuguese', 'pdf', name), 1, 1)
+                 assert not empty.books and not empty.has_next, 'empty_search_failed'
+                 result['checks'].append({'empty_search': 'passed'})
++                if getattr(provider, 'supports_delivery', True) is False:
++                    fresh = await provider.details(page.books[0])
++                    result['status'] = 'search_only'
++                    result['download_verified'] = False
++                    result['limitation'] = 'PDF endpoint refused the server in run 36882386478; only external-page access is enabled.'
++                    result['checks'].append({'external_page': fresh.source_url})
++                    continue
+                 async def progress(current, total):
+                     pass
+                 downloaded = False
+@@ -68,7 +75,8 @@
+             finally:
+                 (output / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
+             print(json.dumps({'source': name, **result}, ensure_ascii=False), flush=True)
+-    report['status'] = 'passed' if all(item['status'] == 'passed' for item in report['sources'].values()) else 'failed'
++    report['verification_scope'] = 'Four PDF delivery sources plus one external-search-only catalog; not five PDF sources.'
++    report['status'] = 'passed' if all(item['status'] in {'passed', 'search_only'} for item in report['sources'].values()) else 'failed'
+     (output / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
+     return report
+ 
+--- a/tests/test_infolivros.py
++++ b/tests/test_infolivros.py
+@@ -68,10 +68,42 @@
+ async def test_record_cache_does_not_mix_books(settings):
+     source=InfoLivros(settings,None,None);book=source.parse_index(INDEX)[0]
+     source._get=AsyncMock(return_value=(raw_record(book),'text/html'))
+-    await source.details(book); await source.file_info(book)
+-    assert source._get.await_count==1
++    await source.details(book); await source.details(book)
++    source._get.assert_not_awaited()
++    with pytest.raises(UserError, match='apenas para consulta'):
++        await source.file_info(book)
+     with pytest.raises(UserError):await source.details(replace(book,source_url='https://evil.example'))
+ 
+ 
+ def test_unknown_index_not_silently_empty(settings):
+     with pytest.raises(UserError):InfoLivros(settings,None,None).parse_index(b'<h1>Layout changed</h1>')
++
++
++def test_external_catalog_never_displays_fake_download_button(settings):
++    from livros_baltigo import views
++    source=InfoLivros(settings,None,None);book=source.parse_index(INDEX)[0]
++    for favorite in (True,False):
++        rows=views.book_keyboard(book,favorite)
++        assert rows[0][0]['url']==book.source_url
++        assert not any(b.get('callback_data','').startswith('download:') for row in rows for b in row)
++    assert 'Consulta externa' in views.book_card(book)
++
++
++async def test_external_catalog_does_not_reserve_download_quota(settings,store,telegram):
++    from livros_baltigo.jobs import Downloads
++    source=InfoLivros(settings,None,None);book=source.parse_index(INDEX)[0]
++    downloads=Downloads(settings,store,source,telegram)
++    downloads.accepting=True
++    with pytest.raises(UserError) as exc:
++        await downloads.enqueue(123,123,1,book)
++    assert exc.value.code=='external_only'
++    assert await store.daily_usage(123,downloads.today())==0
++    assert downloads.queue.empty()
++
++
++async def test_external_catalog_never_requests_blocked_pdf(settings,tmp_path):
++    source=InfoLivros(settings,None,None)
++    source._get=AsyncMock()
++    with pytest.raises(UserError):
++        await source.download('https://pdf.infolivros.org/PT/test.pdf','pdf',tmp_path/'book.pdf',AsyncMock())
++    source._get.assert_not_awaited()
+--- a/docs/SOURCES_FROM_LIST.md
++++ b/docs/SOURCES_FROM_LIST.md
+@@ -4,7 +4,7 @@
+ 
+ ## Integrados a partir da lista
+ 
+-Project Gutenberg e Internet Archive: pesquisa e download de PDF foram verificados com os adaptadores reais. InfoLivros: o índice público de livros completos, as fichas estruturadas e os links anunciados de PDF foram utilizados na integração. A validação final de arquivos está registrada no relatório da versão.
++Project Gutenberg e Internet Archive: pesquisa e download de PDF foram verificados com os adaptadores reais. InfoLivros: a busca pelo índice público foi validada, mas o download de PDF foi recusado no teste real (execução 36882386478). Foi habilitado somente como consulta externa, com botão Abrir no site, sem envio de arquivo pelo bot e sem consumo da quota local. Não foi contado como quinta fonte de PDF.
+ 
+ Z-Library: integração existente mantida; a consulta HTML não exige que o login EAPI funcione antes. Isso não remove a proteção do site nem confirma downloads da conta. Na verificação Railway da versão 0.5.1, o catálogo permaneceu indisponível por redirecionamento circular.
+ 
+--- a/README.md
++++ b/README.md
+@@ -16,7 +16,7 @@
+ | Internet Archive | Busca/metadados públicos e arquivos de edições marcadas como domínio público. Não acessa empréstimos, arquivos privados ou EPUB criptografado. |
+ | Livros Abertos USP | Scraping das fichas e do catálogo OMP; arquivo integral nativo em PDF/EPUB quando anunciado, com licença verificada na ficha. |
+ | Editora UFPB | Scraping do catálogo OMP e links de PDF gratuito anunciados pela editora. Preserva direitos autorais; gratuito não significa domínio público. |
+-| InfoLivros | Scraping do índice de livros completos, pesquisa local por título/autor e link de PDF gratuito anunciado na própria ficha. Não confunde artigos e categorias com livros completos. Índice em cache por 24 horas. |
++| InfoLivros | Consulta externa pelo índice de livros completos, com pesquisa local por título/autor e botão Abrir no site. O download pelo servidor foi recusado; não há envio de PDF nem consumo de quota nesta fonte. Índice em cache por 24 horas. |
+ | Z-Library | Consulta HTML pública separada do login EAPI. Download e quota continuam dependentes da conta. Bloqueios, CAPTCHA e redirecionamentos que não abrem o catálogo são falhas reais e não são contornados. |
+ 
+ Os catálogos não têm necessariamente os mesmos livros. Uma fonte indisponível não bloqueia as outras. No modo Automático, consultas independentes são feitas em grupos limitados, com prazos de resposta; a fonte usada aparece no resultado. Resultado vazio e falha de conexão são estados distintos.
+@@ -33,12 +33,12 @@
+ 
+ As fontes públicas não consultam a quota de outra biblioteca. O limite local diário continua valendo. PDFs e EPUBs são verificados antes do envio; páginas HTML de erro, arquivos truncados e formatos incompatíveis não são aceitos. Temporários são apagados ao encerrar o pedido. O pipeline só registra entrega concluída após validar mensagem, chat e documento na resposta do Telegram; envios incertos não são repetidos automaticamente.
+ 
+-O PDF Gutenberg não é um fac-símile: diagrama o texto integral sem tradução ou resumo, conservando os créditos e a licença. As demais fontes fornecem arquivos nativos, sem alteração do conteúdo.
++O PDF Gutenberg não é um fac-símile: diagrama o texto integral sem tradução ou resumo, conservando os créditos e a licença. Archive, USP e UFPB fornecem arquivos nativos, sem alteração do conteúdo. InfoLivros é somente consulta externa.
+ 
+ ## Verificações
+ 
+ `python -m pytest -ra` executa regressões locais com conexões externas bloqueadas. Os transportes Telegram nesses testes são simulados.
+ 
+-`python -m livros_baltigo.multisource_check --output public-verification` testa consultas positivas, consultas vazias e um PDF real por fonte pública. Não usa token Telegram nem credenciais de bibliotecas. Registra tamanho, SHA-256, título e origem. Os relatórios em `docs/PUBLIC_VERIFICATION_*.json` distinguem essas etapas da entrega no chat.
++`python -m livros_baltigo.multisource_check --output public-verification` testa consultas positivas e vazias, PDFs reais de quatro fontes e o acesso por página externa do InfoLivros. O relatório distingue `passed` para fontes com PDF validado de `search_only` para a consulta externa. Não usa token Telegram nem credenciais de bibliotecas. Registra tamanho, SHA-256, título e origem. Os relatórios em `docs/PUBLIC_VERIFICATION_*.json` distinguem essas etapas da entrega no chat.
+ 
+ A revisão dos endereços enviados pelo usuário está em `docs/SOURCES_FROM_LIST.md`. Não foi assumido que abrir a página inicial equivale a disponibilizar download.
