@@ -65,6 +65,9 @@ class Downloads:
                 raise UserError("Você já tem um livro na fila ou em envio. Aguarde a conclusão desse pedido.", "duplicate_job")
             if self.queue.full():
                 raise UserError("A fila está cheia. Tente novamente mais tarde.", "queue_full")
+            provider = self.source.for_book(book) if isinstance(self.source, CatalogRouter) else self.source
+            if getattr(provider, "supports_delivery", True) is False:
+                raise UserError("Esta fonte é somente consulta. Abra a ficha e toque em Abrir no site.", "external_only")
             if book.extension not in {"pdf", "epub"}:
                 raise UserError("Escolha uma edição EPUB ou PDF.", "unsupported_format")
             if book.size is not None and book.size > self.settings.max_file_bytes:

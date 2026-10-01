@@ -15,7 +15,7 @@ LANGUAGES = {
 }
 SOURCES = {"auto": "Automático", "gutenberg": "Project Gutenberg",
            "archive": "Internet Archive", "usp": "Livros Abertos USP",
-           "ufpb": "Editora UFPB", "zlibrary": "Z-Library"}
+           "ufpb": "Editora UFPB", "infolivros": "InfoLivros", "zlibrary": "Z-Library"}
 FORMATS = {"any": "EPUB e PDF", "epub": "EPUB", "pdf": "PDF"}
 
 

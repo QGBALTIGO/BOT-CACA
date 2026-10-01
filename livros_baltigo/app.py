@@ -61,30 +61,8 @@ class BotApp:
         if webhook.get("url"):
             raise UserError("Este token já tem um webhook configurado. Use um bot novo ou remova conscientemente a integração anterior antes de iniciar polling.", "existing_webhook")
         commands = [{"command": command, "description": description} for command, description in COMMANDS]
-        # Substitui inclusive os menus antigos por idioma deixados por outras integrações.
-        for language in ("", "pt", "en", "es"):
-            for scope in ({"type": "default"}, {"type": "all_private_chats"}):
-                try:
-                    await self.tg.call("setMyCommands", {"commands": commands, "scope": scope, "language_code": language})
-                except TelegramError as exc:
-                    log.warning("Menu global pendente: código=%s", exc.code)
-        for uid in self.settings.admin_ids:
-            for language in ("", "pt", "en", "es"):
-                try:
-                    await self.tg.call("setMyCommands", {"commands": commands, "scope": {"type": "chat", "chat_id": uid}, "language_code": language})
-                except TelegramError as exc:
-                    # Um administrador que ainda não abriu o bot não impede o início.
-                    log.warning("Menu individual pendente: código=%s", exc.code)
-        for method, field, text in (
-            ("setMyName", "name", self.settings.brand[:64]),
-            ("setMyDescription", "description", "Sua próxima leitura começa aqui. Busque por título ou autor, salve seus favoritos e receba edições disponíveis em EPUB ou PDF. Tudo pelos botões, em português."),
-            ("setMyShortDescription", "short_description", "Livros, favoritos e novas leituras. Busque pelo título ou autor, sem precisar decorar comandos."),
-        ):
-            for language in ("", "pt", "en", "es"):
-                try:
-                    await self.tg.call(method, {field: text, "language_code": language})
-                except TelegramError as exc:
-                    log.warning("Metadados não atualizados: método=%s; código=%s", method, exc.code)
+        from .interface import sync_interface
+        await sync_interface(self.tg, self.settings, commands, me.get("id"))
         self.downloads.start()
         log.info("Identidade Telegram validada: @%s; interface pt-BR; fonte=%s", self.username, "configurada_nao_validada" if self.settings.source_configured else "aguardando_credenciais")
 

@@ -93,10 +93,11 @@ class CatalogRouter:
         if time.monotonic() < self.legacy_retry_at and 'zlibrary' in first:
             first.remove('zlibrary')
         second = [name for name in ('usp', 'ufpb') if name in self.enabled]
-        if not first and not second:
+        third = ['infolivros'] if 'infolivros' in self.enabled else []
+        if not first and not second and not third:
             raise UserError('Nenhuma fonte está disponível agora. Consulte /fontes.', 'catalog_unavailable')
         failures, empty = [], None
-        for batch in (first, second):
+        for batch in (first, second, third):
             responses = await asyncio.gather(*(self._search_one(name, spec, page, limit) for name in batch), return_exceptions=True)
             for source, result in zip(batch, responses):
                 if isinstance(result, BaseException):
@@ -125,7 +126,7 @@ class CatalogRouter:
         host = urlsplit(url).hostname or ''
         if host in {'www.gutenberg.org', 'gutenberg.org'}:
             return await self.provider('gutenberg').cover(url)
-        for name in ('archive', 'usp', 'ufpb'):
+        for name in ('archive', 'usp', 'ufpb', 'infolivros'):
             if name not in self.enabled:
                 continue
             provider = self.providers[name]

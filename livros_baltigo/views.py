@@ -26,7 +26,12 @@ def home_keyboard(admin: bool = False):
 
 def book_keyboard(book: Book, favorite: bool, back: str = ""):
     rows = []
-    if book.extension in {"pdf", "epub"}:
+    if book.source == "infolivros":
+        import re
+        expected = "https://infolivros.org/livro/" + book.id + "/"
+        if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", book.id) and book.source_url == expected:
+            rows.append([{"text": "🌐 Abrir no site", "url": expected}])
+    elif book.extension in {"pdf", "epub"}:
         rows.append([button(f"📥 Receber {book.extension.upper()}", f"download:{book.key}")])
     extra = ":" + back.split(":", 1)[1] if back.startswith("editions:") else ""
     rows.append([button("🔖 Remover dos favoritos" if favorite else "🔖 Salvar nos favoritos", f"favorite:{book.key}:{0 if favorite else 1}{extra}")])
@@ -48,6 +53,8 @@ def book_card(book: Book, detailed: bool = True) -> str:
     if book.publisher:
         bits.append(f"Editora: {esc(book.publisher, 70)}")
     bits.append(f"Fonte: {esc(SOURCES.get(book.source, book.source), 60)}")
+    if book.source == 'infolivros':
+        bits.append('Consulta externa; esta fonte não envia PDF pelo bot.')
     if book.source == 'gutenberg' and book.extension == 'pdf':
         bits.append('PDF diagramado do texto integral; não é fac-símile.')
     if detailed and book.description:
@@ -241,5 +248,6 @@ def sources_text(states, preferences):
                   'O PDF não reproduz a edição impressa. A busca por clássicos é o foco desse catálogo.',
                   '<b>Internet Archive</b>: arquivos públicos marcados como domínio público, sem empréstimos.',
                   '<b>USP</b>: livros acadêmicos com licença aberta verificada na ficha.',
-                  '<b>UFPB</b>: PDFs gratuitos disponibilizados pela editora; os direitos autorais são preservados.'])
+                  '<b>UFPB</b>: PDFs gratuitos disponibilizados pela editora; os direitos autorais são preservados.',
+                  '<b>InfoLivros</b>: somente consulta, com botão Abrir no site. O download pelo servidor foi recusado.'])
     return '\n'.join(lines)

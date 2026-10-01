@@ -1,0 +1,118 @@
+{
+  "version": "0.5.2",
+  "telegram_delivery_tested": false,
+  "account_credentials_used": false,
+  "sources": {
+    "gutenberg": {
+      "checks": [
+        {
+          "search": "Dom Casmurro",
+          "results": 1,
+          "has_next": false
+        },
+        {
+          "empty_search": "passed"
+        },
+        {
+          "download": "passed",
+          "format": "pdf",
+          "title": "Dom Casmurro",
+          "source_url": "https://www.gutenberg.org/ebooks/55752",
+          "bytes": 482830,
+          "sha256": "90d1db619b239d6cc36519a1801d3aeaf6d2bbba9ebc599805b79842323b6bc4"
+        }
+      ],
+      "status": "passed"
+    },
+    "archive": {
+      "checks": [
+        {
+          "search": "Dom Casmurro",
+          "results": 2,
+          "has_next": true
+        },
+        {
+          "empty_search": "passed"
+        },
+        {
+          "download": "passed",
+          "format": "pdf",
+          "title": "Dom Casmurro - Machado de Assis (1899)",
+          "source_url": "https://archive.org/details/bv00180a",
+          "bytes": 638531,
+          "sha256": "8810ab883c04560574f5b41f7679f437f4c7d5db1e1d17e9de8964056f865985"
+        }
+      ],
+      "status": "passed"
+    },
+    "usp": {
+      "checks": [
+        {
+          "search": "Pesquisa em educação",
+          "results": 2,
+          "has_next": true
+        },
+        {
+          "empty_search": "passed"
+        },
+        {
+          "download": "passed",
+          "format": "pdf",
+          "title": "Psicologia da educação e processos educacionais: contribuições de diferentes perspectivas teóricas. Vol. 4",
+          "source_url": "https://www.livrosabertos.abcd.usp.br/portaldelivrosUSP/catalog/book/1733",
+          "bytes": 6945474,
+          "sha256": "f1593082dab6ba423af33b0e643f6239f8fb05087a607f7eeb2faf6119aa87f2"
+        }
+      ],
+      "status": "passed"
+    },
+    "ufpb": {
+      "checks": [
+        {
+          "search": "Cuidados em saúde bucal",
+          "results": 2,
+          "has_next": false
+        },
+        {
+          "empty_search": "passed"
+        },
+        {
+          "download": "passed",
+          "format": "pdf",
+          "title": "Cuidados em Saúde Bucal no Sistema Único de Saúde",
+          "source_url": "https://www.editora.ufpb.br/press5/index.php/UFPB/catalog/book/677",
+          "bytes": 5512114,
+          "sha256": "532ef5189d739305545c48c83980e4ae2a3feb046551f70885929e8ecc7ab32d"
+        }
+      ],
+      "status": "passed"
+    },
+    "infolivros": {
+      "checks": [
+        {
+          "search": "Orgulho e Preconceito",
+          "results": 1,
+          "has_next": false
+        },
+        {
+          "empty_search": "passed"
+        },
+        {
+          "external_page": "https://infolivros.org/livro/orgulho-e-preconceito-jane-austen/"
+        }
+      ],
+      "status": "search_only",
+      "download_verified": false,
+      "limitation": "PDF endpoint refused the server in run 36882386478; only external-page access is enabled."
+    }
+  },
+  "status": "passed",
+  "verification_scope": "Four PDF delivery sources plus one external-search-only catalog; not five PDF sources.",
+  "automated_tests": {
+    "tests": 306,
+    "errors": 0,
+    "failures": 0,
+    "skipped": 0
+  },
+  "verified_at_utc": "2026-10-01T15:18:12.024959+00:00"
+}

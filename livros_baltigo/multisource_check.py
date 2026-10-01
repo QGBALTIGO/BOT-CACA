@@ -14,18 +14,20 @@ from .gutenberg import Gutenberg
 from .models import SearchSpec
 from .network import new_session
 from .omp import UniversityBooks
+from .infolivros import InfoLivros
 
 
 async def verify(output: Path):
     output.mkdir(parents=True, exist_ok=True)
     settings = Settings(bot_token='', admin_ids=frozenset(), base_url='', data_dir=output)
-    report = {'version': '0.5.1', 'telegram_delivery_tested': False,
+    report = {'version': '0.5.2', 'telegram_delivery_tested': False,
               'account_credentials_used': False, 'sources': {}, 'status': 'failed'}
     async with new_session() as session, new_session() as files:
         sources = {'gutenberg': Gutenberg(settings, session, files),
                    'archive': InternetArchive(settings, session, files),
                    'usp': UniversityBooks(settings, session, files, 'usp'),
-                   'ufpb': UniversityBooks(settings, session, files, 'ufpb')}
+                   'ufpb': UniversityBooks(settings, session, files, 'ufpb'),
+                   'infolivros': InfoLivros(settings, session, files)}
         for name, provider in sources.items():
             result = {'checks': [], 'status': 'failed'}
             report['sources'][name] = result
@@ -37,6 +39,13 @@ async def verify(output: Path):
                 empty = await provider.search(SearchSpec('zzqvnonexistentbookzz', 'portuguese', 'pdf', name), 1, 1)
                 assert not empty.books and not empty.has_next, 'empty_search_failed'
                 result['checks'].append({'empty_search': 'passed'})
+                if getattr(provider, 'supports_delivery', True) is False:
+                    fresh = await provider.details(page.books[0])
+                    result['status'] = 'search_only'
+                    result['download_verified'] = False
+                    result['limitation'] = 'PDF endpoint refused the server in run 36882386478; only external-page access is enabled.'
+                    result['checks'].append({'external_page': fresh.source_url})
+                    continue
                 async def progress(current, total):
                     pass
                 downloaded = False
@@ -66,14 +75,15 @@ async def verify(output: Path):
             finally:
                 (output / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
             print(json.dumps({'source': name, **result}, ensure_ascii=False), flush=True)
-    report['status'] = 'passed' if all(item['status'] == 'passed' for item in report['sources'].values()) else 'failed'
+    report['verification_scope'] = 'Four PDF delivery sources plus one external-search-only catalog; not five PDF sources.'
+    report['status'] = 'passed' if all(item['status'] in {'passed', 'search_only'} for item in report['sources'].values()) else 'failed'
     (output / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2))
     return report
 
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--output', type=Path, default=Path('public-051-verification'))
+    parser.add_argument('--output', type=Path, default=Path('public-052-verification'))
     args = parser.parse_args()
     result = asyncio.run(verify(args.output))
     return 0 if result['status'] == 'passed' else 1
