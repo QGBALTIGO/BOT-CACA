@@ -1,0 +1,65 @@
+name: Validate and commit book-bot repairs
+on:
+  push:
+    branches: ['fix/livros-audit-20261001']
+    paths: ['maintenance/repair-ready.json']
+permissions:
+  contents: write
+concurrency:
+  group: livros-maintenance-050
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Apply the reviewed patch to its known baseline
+        run: |
+          git merge-base --is-ancestor 163eb2de0d29f850a9c699ab736be84bbb54f486 HEAD
+          python - <<'PY'
+          import hashlib, json, pathlib
+          manifest = json.loads(pathlib.Path('maintenance/repair-ready.json').read_text())
+          data = b''.join(pathlib.Path('maintenance', name).read_bytes() for name in manifest['parts'])
+          if hashlib.sha256(data).hexdigest() != manifest['sha256']:
+              raise SystemExit('Maintenance patch checksum mismatch')
+          pathlib.Path('/tmp/livros-repair.patch').write_bytes(data)
+          PY
+          git apply --check --unidiff-zero /tmp/livros-repair.patch
+          git apply --unidiff-zero /tmp/livros-repair.patch
+      - name: Install dependencies and compile
+        run: |
+          python -m pip install -r requirements-dev.txt
+          python -m compileall -q livros_baltigo
+      - name: Run isolated regression suite
+        run: python -m pytest -ra --junitxml=test-results.xml
+      - name: Verify real public catalog, PDF and EPUB without Telegram credentials
+        run: python -m livros_baltigo.public_check --output public-verification
+      - name: Commit only verified code and verification report
+        run: |
+          mkdir -p docs
+          cp public-verification/report.json docs/PUBLIC_VERIFICATION_0.5.0.json
+          git config user.name 'Livros Maintenance'
+          git config user.email '119024696+QGBALTIGO@users.noreply.github.com'
+          git add livros_baltigo tests requirements.txt README.md docs/PUBLIC_VERIFICATION_0.5.0.json
+          git rm .github/workflows/repair-validation.yml maintenance/repair-ready.json maintenance/repair-*.patch
+          git commit -m 'fix: independent book catalogs, verified deliveries, PDF conversion and regression coverage'
+          git push origin HEAD:fix/livros-audit-20261001
+      - name: Package exact verified source
+        if: always()
+        run: |
+          tar --exclude='.git' --exclude='public-verification' --exclude='.pytest_cache' --exclude='__pycache__' -czf /tmp/verified-source.tar.gz livros_baltigo tests requirements.txt requirements-dev.txt README.md Dockerfile
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: livros-050-verification
+          path: |
+            test-results.xml
+            public-verification/
+            /tmp/verified-source.tar.gz
+          retention-days: 7
