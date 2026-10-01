@@ -1,0 +1,299 @@
+diff --git a/livros_baltigo/views.py b/livros_baltigo/views.py
+index b1c5b5d..ee02cf3 100644
+--- a/livros_baltigo/views.py
++++ b/livros_baltigo/views.py
+@@ -161,7 +161,7 @@ def group_results(page: SearchPage, query: str, ident: str, groups: list[BookGro
+         lines.extend([esc(page.notice, 350), ''])
+     rows = []
+     if not groups:
+-        lines += ["<b>Ainda não encontrei essa leitura.</b>",
++        lines += ["<b>Nenhuma edição encontrada nesta consulta.</b>",
+                   "Tente o título original, o nome do autor ou amplie o idioma."]
+         rows.append([button("🌐 Tentar em todos os idiomas", f"searchall:{ident}")])
+     for n, (group, target) in enumerate(zip(groups, targets), 1):
+@@ -179,6 +179,7 @@ def group_results(page: SearchPage, query: str, ident: str, groups: list[BookGro
+         navigation.append(button("Próxima →", f"page:{ident}:{page.page + 1}"))
+     if navigation:
+         rows.append(navigation)
++    rows.append([button("📂 Buscar em outra fonte", f"searchsources:{ident}")])
+     rows.append([button("🌐 Filtros", "menu:settings"), button("🔎 Nova busca", "menu:search")])
+     rows.append([button("📚 Início", "menu:home")])
+     return "\n".join(lines), rows
+@@ -227,7 +228,9 @@ def sources_text(states, preferences):
+               'disabled': 'Desativado', 'empty_probe': 'Teste respondeu sem encontrar a obra'}
+     lines = ['📂 <b>Seus catálogos de leitura</b>', '',
+              'Selecionado: <b>' + SOURCES.get(preferences.get('source', 'auto'), 'Automático') + '</b>', '']
+-    for name in ('gutenberg', 'zlibrary'):
++    for name in SOURCES:
++        if name == 'auto':
++            continue
+         item = states.get(name, {'status': 'not_verified'})
+         lines.append('<b>' + SOURCES[name] + '</b> · ' + labels.get(item['status'], 'Ainda não verificado'))
+         if item.get('error') == 'source_protected':
+@@ -235,5 +238,7 @@ def sources_text(states, preferences):
+     lines.extend(['', 'Os catálogos são independentes e não contêm necessariamente os mesmos títulos.',
+                   'No modo Automático, a fonte usada aparece nos resultados e fica fixa durante a paginação.', '',
+                   '<b>Project Gutenberg</b> oferece EPUB da fonte e PDF diagramado do texto integral, com créditos e licença. '
+-                  'O PDF não reproduz a edição impressa. A busca por clássicos é o foco desse catálogo.'])
++                  'O PDF não reproduz a edição impressa. A busca por clássicos é o foco desse catálogo.',
++                  '<b>Internet Archive</b>: arquivos públicos marcados como domínio público, sem empréstimos.',
++                  '<b>USP e UFPB</b>: livros acadêmicos com licença aberta verificada na ficha.'])
+     return '\n'.join(lines)
+diff --git a/tests/test_multiple_sources.py b/tests/test_multiple_sources.py
+new file mode 100644
+index 0000000..d1fd226
+--- /dev/null
++++ b/tests/test_multiple_sources.py
+@@ -0,0 +1,252 @@
++"""Regressions for the live empty-search marker and independent source adapters."""
++from __future__ import annotations
++
++import asyncio
++import io
++import json
++import time
++import zipfile
++from dataclasses import replace
++from unittest.mock import AsyncMock
++
++import pytest
++
++from livros_baltigo import views
++from livros_baltigo.app import BotApp
++from livros_baltigo.archive import InternetArchive
++from livros_baltigo.catalog import SOURCES
++from livros_baltigo.catalogs import CatalogRouter
++from livros_baltigo.errors import UserError
++from livros_baltigo.gutenberg import parse_feed
++from livros_baltigo.models import Book, SearchPage, SearchSpec
++from livros_baltigo.omp import UniversityBooks
++from livros_baltigo.open_http import cc_license
++from livros_baltigo.scraper import HTMLSource
++from conftest import Response, Session
++
++# Reduced verbatim structure of the public OPDS response captured 2026-10-01.
++EMPTY = b'''<feed xmlns="http://www.w3.org/2005/Atom"><entry>
++<id>https://www.gutenberg.org/ebooks.opds/</id><title>No records found.</title>
++<link type="application/atom+xml;profile=opds-catalog" rel="subsection" href="/ebooks.opds/"/>
++</entry></feed>'''
++
++
++def record_html(source, number='414', language='pt', license=True, extension='pdf'):
++    origin, prefix, _ = __import__('livros_baltigo.omp', fromlist=['CATALOGS']).CATALOGS[source]
++    rights = '<meta name="DC.Rights" content="https://creativecommons.org/licenses/by-nc-sa/4.0/">' if license else ''
++    return f'''<html><head><meta name="DC.Identifier" content="{number}">
++<meta name="DC.Language" content="{language}"><meta name="citation_author" content="Autora de teste">
++<meta name="citation_publication_date" content="2026-01-01">{rights}</head>
++<body><div class="obj_monograph_full"><h1 class="title">Livro com acentuação</h1>
++<div class="item abstract"><div class="value">Sinopse completa.</div></div>
++<div class="item files"><a class="cmp_download_link" href="{origin}{prefix}/catalog/view/{number}/2/3">{extension}</a></div>
++</div></body></html>'''.encode()
++
++
++def search_html(source, ids=('414',)):
++    origin, prefix, _ = __import__('livros_baltigo.omp', fromlist=['CATALOGS']).CATALOGS[source]
++    cards = ''.join(f'<div class="obj_monograph_summary"><h2 class="title"><a href="{origin}{prefix}/catalog/book/{n}">Livro {n}</a></h2></div>' for n in ids)
++    return f'<html><div class="page_search">{cards}</div></html>'.encode()
++
++
++def archive_row(number='publicbook'):
++    return {'identifier': number, 'title': 'Dom Casmurro', 'creator': 'Machado de Assis',
++            'language': 'por', 'licenseurl': 'https://creativecommons.org/publicdomain/mark/1.0/',
++            'format': ['Text PDF', 'EPUB']}
++
++
++@pytest.mark.parametrize('query', ['Harry Potter', 'zzqvnonexistentbookzz', 'José & Maria'])
++def test_real_gutenberg_empty_marker_is_not_a_book(query):
++    assert parse_feed(EMPTY, SearchSpec(query)) == ([], '')
++
++
++@pytest.mark.parametrize('raw', [EMPTY.replace(b'/ebooks.opds/</id>', b'/ebooks/broken</id>'),
++    EMPTY.replace(b'href="/ebooks.opds/"', b'href="https://evil.example/"'),
++    EMPTY.replace(b'No records found.', b'Unknown schema')])
++def test_empty_detection_does_not_accept_unknown_or_malicious_records(raw):
++    with pytest.raises(UserError):
++        parse_feed(raw, SearchSpec('test'))
++
++
++@pytest.mark.parametrize('source', ['usp', 'ufpb'])
++def test_university_search_and_actual_edition_format(settings, source):
++    provider = UniversityBooks(settings, None, None, source)
++    assert provider.parse_search(search_html(source)) == ['414']
++    assert provider.parse_search(search_html(source, ())) == []
++    records = provider.parse_record(record_html(source), '414')
++    book, url = records['pdf']
++    assert book.source == source and book.language == 'portuguese'
++    assert book.title == 'Livro com acentuação'
++    assert '/catalog/download/414/2/3' in url
++    assert 'creativecommons.org' in book.description
++
++
++@pytest.mark.parametrize('source', ['usp', 'ufpb'])
++async def test_university_pagination_no_lost_editions(settings, source):
++    provider = UniversityBooks(settings, None, None, source)
++    provider._get = AsyncMock(return_value=(search_html(source, ('1', '2', '3')), 'text/html'))
++    async def record(number):
++        return provider.parse_record(record_html(source, number), number)
++    provider._record = AsyncMock(side_effect=record)
++    first = await provider.search(SearchSpec('educação', extension='pdf'), 1, 2)
++    second = await provider.search(SearchSpec('educação', extension='pdf'), 2, 2)
++    assert [b.id for b in first.books] == ['1', '2']
++    assert [b.id for b in second.books] == ['3']
++    assert first.has_next and not second.has_next
++    assert provider._get.await_count == 1
++
++
++@pytest.mark.parametrize('source', ['usp', 'ufpb'])
++def test_university_requires_real_edition_license(settings, source):
++    provider = UniversityBooks(settings, None, None, source)
++    with pytest.raises(UserError) as exc:
++        provider.parse_record(record_html(source, license=False), '414')
++    assert exc.value.code == 'rights_unverified'
++    with pytest.raises(UserError):
++        provider.parse_record(record_html(source, number='1'), '2')
++
++
++@pytest.mark.parametrize('value', ['https://evil.example/licenses/by/4.0/',
++    'https://creativecommons.org.evil.example/licenses/by/4.0/',
++    'javascript:alert(1)', 'http://localhost/licenses/by/4.0/'])
++def test_license_host_validation(value):
++    assert not cc_license([value])
++
++
++@pytest.mark.parametrize('source', ['usp', 'ufpb'])
++@pytest.mark.parametrize('url', ['https://localhost/file.pdf', 'https://127.0.0.1/file.pdf',
++    'https://evil.example/file.pdf', 'https://www.livrosabertos.abcd.usp.br/portaldelivrosUSP/../admin',
++    'file:///etc/passwd'])
++def test_university_unsafe_urls(settings, source, url):
++    with pytest.raises(UserError):
++        UniversityBooks(settings, None, None, source).allowed_url(url)
++
++
++def test_archive_public_domain_search_and_empty(settings):
++    provider = InternetArchive(settings, None, None)
++    raw = json.dumps({'response': {'numFound': 1, 'docs': [archive_row()]}}).encode()
++    books, total = provider.parse_search(raw, SearchSpec('Dom Casmurro'))
++    assert len(books) == 2 and total == 1
++    assert {b.extension for b in books} == {'pdf', 'epub'}
++    assert all(b.source == 'archive' for b in books)
++    assert provider.parse_search(b'{"response":{"numFound":0,"docs":[]}}', SearchSpec('missing')) == ([], 0)
++
++
++@pytest.mark.parametrize('change', [{'licenseurl': ''}, {'collection': ['inlibrary']},
++    {'access-restricted-item': True}, {'format': ['LCP Encrypted EPUB']}])
++def test_archive_does_not_offer_restricted_or_encrypted_editions(settings, change):
++    provider = InternetArchive(settings, None, None)
++    row = archive_row() | change
++    raw = json.dumps({'response': {'numFound': 1, 'docs': [row]}}).encode()
++    assert not provider.parse_search(raw, SearchSpec('Dom'))[0]
++
++
++def test_archive_matches_file_and_limits_size(settings):
++    provider = InternetArchive(settings, None, None)
++    book = Book('publicbook', 'ia_pdf', 'Dom', extension='pdf', source='archive')
++    data = {'metadata': archive_row(), 'files': [{'name': 'dom casmurro.pdf', 'size': '567017', 'format': 'Text PDF'},
++        {'name': 'large.pdf', 'size': str(100_000_000)}, {'name': 'private.pdf', 'size': '100', 'private': 'true'}]}
++    fresh, url = provider.parse_record(json.dumps(data).encode(), book)
++    assert fresh.size == 567017 and url.endswith('dom%20casmurro.pdf')
++    data['metadata']['access-restricted-item'] = 'true'
++    with pytest.raises(UserError):
++        provider.parse_record(json.dumps(data).encode(), book)
++
++
++@pytest.mark.parametrize('url', ['https://evil.archive.org/download/book/x.pdf',
++    'https://archive.org.evil.example/download/book/x.pdf', 'https://archive.org/download/../admin',
++    'https://archive.org/metadata/name%2f..%2f..%2fadmin', 'https://127.0.0.1/download/book/x.pdf'])
++def test_archive_files_cannot_escape_allowlist(settings, url):
++    with pytest.raises(UserError):
++        InternetArchive(settings, None, None).allowed_url(url)
++
++
++@pytest.mark.parametrize('status', [403, 429, 503, 513])
++async def test_new_sources_pause_after_access_denial(settings, status):
++    session = Session([Response(body=b'denied', status=status)])
++    provider = UniversityBooks(settings, session, session)
++    provider.request_interval = 0
++    for _ in range(2):
++        with pytest.raises(UserError):
++            await provider._get(provider.origin + provider.prefix + '/search')
++    assert len(session.calls) == 1
++
++
++async def test_public_html_search_does_not_call_eapi_or_send_account_cookie(settings):
++    session = Session([Response(body=b'<div id="searchResultBox" class="notFound">Nada</div>')])
++    provider = HTMLSource(replace(settings, user_id='', user_key='', email='hidden@example.com', password='not-for-html'), session, session)
++    provider.ensure_login = AsyncMock(side_effect=AssertionError('EAPI must not be called by public HTML search'))
++    await provider.get_html('/s/Teste')
++    provider.ensure_login.assert_not_awaited()
++    assert session.calls[0][0] == 'GET'
++    assert not any('cookie' in key.lower() or 'authorization' in key.lower() for key in session.calls[0][2]['headers'])
++
++
++@pytest.mark.parametrize('raw,mime', [(b'<html>login</html>', 'text/html'), (b'%PDF-1.4 broken', 'application/pdf'), (b'abc', 'application/octet-stream')])
++async def test_real_file_validation_rejects_pages_and_truncation(settings, tmp_path, raw, mime):
++    provider = InternetArchive(settings, None, None)
++    provider._get = AsyncMock(return_value=(raw, mime))
++    target = tmp_path/'book.pdf'
++    with pytest.raises(UserError):
++        await provider.download('https://archive.org/download/a/b.pdf', 'pdf', target, AsyncMock())
++    assert not target.exists()
++
++
++async def test_native_pdf_not_modified(settings, tmp_path):
++    raw = b'%PDF-1.4\nunit-test fixture only\n%%EOF\n'
++    provider = UniversityBooks(settings, None, None)
++    provider._get = AsyncMock(return_value=(raw, 'application/pdf'))
++    path = tmp_path/'book.pdf'
++    await provider.download(provider.origin + provider.prefix + '/catalog/download/1/2/3', 'pdf', path, AsyncMock())
++    assert path.read_bytes() == raw
++
++
++async def test_router_extra_source_failure_does_not_disable_other_sources(settings, source):
++    pg = AsyncMock()
++    pg.search.side_effect = UserError('network', 'source_timeout')
++    source.search.side_effect = ValueError('broken parser')
++    extra = AsyncMock()
++    book = Book('42', 'ia_pdf', 'Dom', extension='pdf', source='archive')
++    extra.search.return_value = SearchPage([book], 1, False, source='archive')
++    router = CatalogRouter(settings, source, pg, {'archive': extra})
++    result = await router.search(SearchSpec('Dom'))
++    assert result.books == [book] and result.source == 'archive'
++    assert router.for_book(book) is extra
++
++
++async def test_valid_empty_source_does_not_become_all_sources_failure(settings, source):
++    source.search.side_effect = UserError('blocked', 'source_protected')
++    pg = AsyncMock()
++    pg.search.return_value = SearchPage([], 1, False, source='gutenberg')
++    result = await CatalogRouter(settings, source, pg).search(SearchSpec('missing'))
++    assert not result.books and 'indisponíveis' in result.notice
++
++
++async def test_source_switch_preserves_query_filters_owner_and_pagination(settings, source, store, telegram):
++    pg = AsyncMock()
++    pg.search.return_value = SearchPage([], 1, False, source='gutenberg')
++    university = AsyncMock()
++    book = Book('414', 'omp_pdf', 'Pesquisa', language='portuguese', extension='pdf', source='usp')
++    university.search.return_value = SearchPage([book], 1, True, source='usp')
++    router = CatalogRouter(settings, source, pg, {'usp': university})
++    bot = BotApp(settings, telegram, router, store)
++    ident = await store.session(123, SearchSpec('Pesquisa', 'portuguese', 'pdf', 'gutenberg'), 3600)
++    msg = {'message_id': 10, 'text': 'Resultados'}
++    await bot._callback(123, 123, f'searchsources:{ident}', msg)
++    await bot._callback(123, 123, f'searchvia:{ident}:usp', msg)
++    last = await store.latest_session(123)
++    assert last.source == 'usp' and last.query == 'Pesquisa' and last.extension == 'pdf'
++    assert await store.book(book.key)
++    with pytest.raises(UserError):
++        await bot._callback(456, 456, f'searchvia:{ident}:usp', msg)
++    with pytest.raises(UserError):
++        await bot._callback(123, 123, f'searchvia:{ident}:unknown', msg)
++
++
++def test_all_source_buttons_and_statuses_are_visible():
++    text = views.sources_text({name: {'status': 'ready'} for name in SOURCES if name != 'auto'}, {'source': 'usp'})
++    rows = views.sources_keyboard({'source': 'usp'})
++    for name, label in SOURCES.items():
++        assert label in text
++        assert any(button.get('callback_data') == f'setting:source:{name}' for row in rows for button in row)
++    assert all(len(button['callback_data'].encode()) <= 64 for row in rows for button in row)
